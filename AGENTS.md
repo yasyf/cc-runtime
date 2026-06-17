@@ -1,11 +1,11 @@
-# cc-ask Development Guide
+# cc-runtime Development Guide
 
-A persistent, per-session alternative to AskUserQuestion with richer context and remote approvals from a web app or phone.
+A runtime that supplies Claude Code's harness-injected tools — AskUserQuestion, PushNotification, and more — with richer context and remote delivery from a web app or phone. It backs each harness tool with an implementation that outlives a single prompt: questions and notifications carry full context, reach you on a web app or phone, and persist for the session instead of vanishing when the prompt ends.
 
 ## Repository Structure
 
 ```
-cc-ask/
+cc-runtime/
 ├── .claude/          # Claude Code config — settings, guard hooks, jj config
 ├── .superset/        # Worktree bootstrap (env copy, direnv, jj init)
 ├── docs/             # Brand + project assets (mascot, banner, social card)

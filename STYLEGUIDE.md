@@ -1,4 +1,4 @@
-# cc-ask Style Guide
+# cc-runtime Style Guide
 
 The concrete style rules for this repository.
 
