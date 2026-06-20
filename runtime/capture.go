@@ -2,7 +2,9 @@ package runtime
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
+	"os"
 
 	"github.com/spf13/cobra"
 
@@ -63,9 +65,19 @@ func CaptureNotificationCmd(d cmd.Deps) *cobra.Command {
 				message = pushMessage(in.ToolInput)
 			case "notification":
 				message = in.Message
+			default:
+				return fmt.Errorf("unknown notification source %q", source)
 			}
 			if message == "" {
 				return nil
+			}
+			scope := in.Cwd
+			if scope == "" {
+				wd, err := os.Getwd()
+				if err != nil {
+					return nil
+				}
+				scope = wd
 			}
 			if err := d.EnsureCurrentIfRunning(); err != nil {
 				return nil
@@ -75,7 +87,7 @@ func CaptureNotificationCmd(d cmd.Deps) *cobra.Command {
 				Op:        interaction.OpCaptureNotification,
 				Session:   in.SessionID,
 				ClaudePID: d.ClaudePID(),
-				Scope:     mustCwd(in.Cwd),
+				Scope:     scope,
 				Body:      body,
 			})
 			return nil

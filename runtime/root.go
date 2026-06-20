@@ -1,15 +1,12 @@
 package runtime
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/spf13/cobra"
 
 	"github.com/yasyf/cc-interact/cmd"
-	"github.com/yasyf/cc-interact/daemon"
 
-	"github.com/yasyf/cc-runtime/interaction"
 	"github.com/yasyf/cc-runtime/tui"
 	"github.com/yasyf/cc-runtime/version"
 )
@@ -40,13 +37,13 @@ func Root() *cobra.Command {
 	return root
 }
 
-// startCmd is the human surface: it cold-starts the daemon, resolves the scope's
-// subject, and points the human at the cc-runtime answer surface (the TUI).
+// startCmd is the human surface: it cold-starts the daemon and points the human
+// at the cc-runtime answer surface (the TUI).
 func startCmd(d cmd.Deps) *cobra.Command {
 	var cwd string
 	c := &cobra.Command{
 		Use:   "start",
-		Short: "Start the cc-runtime daemon and resolve this scope's subject",
+		Short: "Start the cc-runtime daemon",
 		Args:  cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
 			ctx := c.Context()
@@ -54,19 +51,9 @@ func startCmd(d cmd.Deps) *cobra.Command {
 				return err
 			}
 			scope := mustCwd(cwd)
-			reply, err := d.NewClient().Do(ctx, daemon.Envelope{
-				Op: interaction.OpStart, ClaudePID: d.ClaudePID(), Scope: scope,
-			})
-			if err != nil {
-				return err
-			}
-			if !reply.OK {
-				return errors.New(reply.Error)
-			}
 			out := c.OutOrStdout()
-			fmt.Fprintf(out, "scope:   %s\n", scope)
-			fmt.Fprintf(out, "subject: %s\n", reply.SubjectID)
-			fmt.Fprintln(out, "answer:  cc-runtime tui")
+			fmt.Fprintf(out, "scope:  %s\n", scope)
+			fmt.Fprintln(out, "answer: cc-runtime tui")
 			return nil
 		},
 	}

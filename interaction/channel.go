@@ -78,7 +78,7 @@ func notifyToolSchema() map[string]any {
 func renderAnswer(raw json.RawMessage) string {
 	var a AnswerPayload
 	if err := json.Unmarshal(raw, &a); err != nil {
-		return string(raw)
+		panic(err)
 	}
 	var b strings.Builder
 	if len(a.Selected) > 0 {
@@ -97,7 +97,7 @@ func renderAnswer(raw json.RawMessage) string {
 		fmt.Fprintf(&b, "notes: %s", a.Notes)
 	}
 	if b.Len() == 0 {
-		return string(raw)
+		return "(empty answer)"
 	}
 	return b.String()
 }

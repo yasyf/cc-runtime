@@ -114,13 +114,13 @@ func handleAnswer(hc daemon.HandlerCtx) daemon.Reply {
 		return daemon.Reply{OK: false, Error: "bad answer body: " + err.Error()}
 	}
 	payload, _ := json.Marshal(a)
+	idled, err := recordAnswer(hc.Ctx, hc.DB, a.SubjectID, a.QuestionID, string(payload))
+	if err != nil {
+		return daemon.Reply{OK: false, Error: err.Error()}
+	}
 	if _, err := hc.Append(hc.Ctx, &event.Event{
 		SubjectID: a.SubjectID, Origin: event.OriginHuman, Type: EventAnswer, Payload: wireEvent(EventAnswer, a),
 	}); err != nil {
-		return daemon.Reply{OK: false, Error: err.Error()}
-	}
-	idled, err := recordAnswer(hc.Ctx, hc.DB, a.SubjectID, a.QuestionID, string(payload))
-	if err != nil {
 		return daemon.Reply{OK: false, Error: err.Error()}
 	}
 	body, _ := json.Marshal(answerReply{Idled: idled})

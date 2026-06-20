@@ -12,12 +12,14 @@ import (
 	"github.com/yasyf/cc-runtime/interaction"
 )
 
-// liveEvent is one decoded frame off the subject's event stream, fed into the
-// Update loop from the consumer goroutine over the events channel.
+// liveEvent is one frame off the subject's event stream, fed into the Update
+// loop from the consumer goroutine over the events channel. A non-nil Err is the
+// stream's terminal frame: the consumer died and no more events will arrive.
 type liveEvent struct {
 	Seq  int64
 	Type string
 	Data string
+	Err  error
 }
 
 // resolvedMsg carries the awaiting subject the poll resolved. Until it arrives
@@ -154,6 +156,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case liveEvent:
+		if msg.Err != nil {
+			m.err = msg.Err
+			return m, nil
+		}
 		m.ingest(msg)
 		return m, m.readEvent()
 

@@ -14,20 +14,11 @@ import (
 )
 
 type listReply struct {
-	Subjects []struct {
-		SubjectID string `json:"subject_id"`
-		Status    string `json:"status"`
-		Pending   int    `json:"pending"`
-	} `json:"subjects"`
-	HTTPPort int `json:"http_port"`
+	Subjects []interaction.ListedSubject `json:"subjects"`
 }
 
 type pendingReply struct {
-	Questions []struct {
-		QuestionID int64  `json:"question_id"`
-		Header     string `json:"header"`
-		Payload    string `json:"payload"`
-	} `json:"questions"`
+	Questions []interaction.PendingQuestion `json:"questions"`
 }
 
 type answerReply struct {

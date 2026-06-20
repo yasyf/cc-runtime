@@ -3,7 +3,6 @@ package interaction
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"time"
 )
@@ -34,14 +33,15 @@ func insertPendingAndAwait(ctx context.Context, db *sql.DB, subjectID string, qu
 	}
 	defer tx.Rollback()
 
+	now := unix(time.Now())
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO pending_questions(subject_id, question_id, header, payload, created_at) VALUES(?,?,?,?,?)`,
-		subjectID, questionID, header, payload, unix(time.Now())); err != nil {
+		subjectID, questionID, header, payload, now); err != nil {
 		return fmt.Errorf("insert pending question: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE subjects SET status=?, updated_at=? WHERE id=?`,
-		StatusAwaiting, unix(time.Now()), subjectID); err != nil {
+		StatusAwaiting, now, subjectID); err != nil {
 		return fmt.Errorf("await subject: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -61,10 +61,19 @@ func recordAnswer(ctx context.Context, db *sql.DB, subjectID string, questionID 
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.ExecContext(ctx,
+	now := unix(time.Now())
+	res, err := tx.ExecContext(ctx,
 		`UPDATE pending_questions SET answered=1, answer=? WHERE subject_id=? AND question_id=?`,
-		answer, subjectID, questionID); err != nil {
+		answer, subjectID, questionID)
+	if err != nil {
 		return false, fmt.Errorf("mark answered: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("mark answered rows: %w", err)
+	}
+	if affected == 0 {
+		return false, fmt.Errorf("answer targets unknown question (subject=%s id=%d)", subjectID, questionID)
 	}
 	var open int
 	if err := tx.QueryRowContext(ctx,
@@ -75,7 +84,7 @@ func recordAnswer(ctx context.Context, db *sql.DB, subjectID string, questionID 
 	if idled {
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE subjects SET status=?, updated_at=? WHERE id=?`,
-			StatusIdle, unix(time.Now()), subjectID); err != nil {
+			StatusIdle, now, subjectID); err != nil {
 			return false, fmt.Errorf("idle subject: %w", err)
 		}
 	}
@@ -91,13 +100,9 @@ func pollAnswer(ctx context.Context, db *sql.DB, subjectID string, questionID in
 		answered int
 		answer   string
 	)
-	err := db.QueryRowContext(ctx,
+	if err := db.QueryRowContext(ctx,
 		`SELECT answered, answer FROM pending_questions WHERE subject_id=? AND question_id=?`,
-		subjectID, questionID).Scan(&answered, &answer)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, "", nil
-	}
-	if err != nil {
+		subjectID, questionID).Scan(&answered, &answer); err != nil {
 		return false, "", fmt.Errorf("poll answer: %w", err)
 	}
 	return answered == 1, answer, nil

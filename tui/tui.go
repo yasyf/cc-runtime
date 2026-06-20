@@ -68,6 +68,7 @@ func run(ctx context.Context, d cmd.Deps, scope string) error {
 // notifications. The TUI is a pid-less consumer (it lives outside any Claude
 // window), so the stream never self-terminates on window death.
 func streamInto(ctx context.Context, d cmd.Deps, scope string, res resolution, events chan<- liveEvent) {
+	defer close(events)
 	client := d.NewClient()
 	src := consume.StreamSource{
 		Port:      res.HTTPPort,
@@ -76,7 +77,7 @@ func streamInto(ctx context.Context, d cmd.Deps, scope string, res resolution, e
 		Paths:     d.Paths,
 		Refresh:   refreshPort(client, scope),
 	}
-	_ = consume.ConsumeEvents(ctx, src, func(seq int64, data string) (bool, error) {
+	err := consume.ConsumeEvents(ctx, src, func(seq int64, data string) (bool, error) {
 		typ := eventType(data)
 		switch typ {
 		case interaction.EventQuestion, interaction.EventNotification:
@@ -88,6 +89,12 @@ func streamInto(ctx context.Context, d cmd.Deps, scope string, res resolution, e
 		}
 		return false, nil
 	})
+	if err != nil && ctx.Err() == nil {
+		select {
+		case events <- liveEvent{Err: err}:
+		case <-ctx.Done():
+		}
+	}
 }
 
 // refreshPort re-resolves the daemon's current HTTP port through OpList so the
