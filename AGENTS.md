@@ -6,19 +6,25 @@ A runtime that supplies Claude Code's harness-injected tools — AskUserQuestion
 
 ```
 cc-runtime/
-├── .claude/          # Claude Code config — settings, guard hooks, jj config
-├── .superset/        # Worktree bootstrap (env copy, direnv, jj init)
-├── docs/             # Brand + project assets (mascot, banner, social card)
-├── AGENTS.md         # This file — shared conventions
-├── CLAUDE.md         # Claude-only rules; embeds AGENTS.md
-├── STYLEGUIDE.md     # Concrete style rules
-├── README.md         # Project overview
-└── CHANGELOG.md      # Keep a Changelog history
+├── .github/workflows/  # CI (Go build, vet, race test)
+├── .claude/            # Claude Code config — settings, guard hooks, jj config
+├── .superset/          # Worktree bootstrap (env copy, direnv, jj init)
+├── docs/               # Brand + project assets (mascot, banner, social card)
+├── go.mod              # Module github.com/yasyf/cc-runtime
+├── main.go             # Entrypoint
+├── version/            # Build version metadata
+├── runtime/            # Runtime core — harness-tool implementations
+├── interaction/        # Interaction domain (questions, notifications)
+├── tui/                # Terminal UI
+├── plugin/             # Claude Code plugin — MCP channel tools + hooks
+├── AGENTS.md           # This file — shared conventions
+├── CLAUDE.md           # Claude-only rules; embeds AGENTS.md
+├── STYLEGUIDE.md       # Concrete style rules
+├── README.md           # Project overview
+└── CHANGELOG.md        # Keep a Changelog history
 ```
 
-The source layout lands with the implementation. The implementation language and
-Claude Code integration shape are still open (see the README); update this tree
-when the first source directories appear.
+cc-runtime is written in Go, built on cc-interact (github.com/yasyf/cc-interact).
 
 ## Ask Before Assuming
 
@@ -120,7 +126,7 @@ Reach for **`Grep`** only for material neither tool indexes: literal *content* o
 
 **Mechanical linting.** CI and hooks handle formatting and import order; fix only what needs human judgment. When reviewing code, don't flag mechanical lint violations (line length, whitespace, import order, trailing commas).
 
-**Testing.** Tests live in `tests/`. The suite and its runner land with the implementation; record the exact command here the moment the first test exists, and keep it current.
+**Testing.** Tests live alongside their packages (Go convention, not a separate `tests/` dir). Run the suite with `go test -race ./...`.
 
 **Writing docs.** When writing or revising docs, a README, a tutorial, a how-to, or reference, use the `writing-docs` skill (Diataxis modes, voice rules, and runnable code-sample rules) and run `slop-cop check <file> --lang=markdown` before you finish.
 

@@ -11,7 +11,7 @@ cc-runtime backs the tools the Claude Code harness injects into a session, repla
 
 ## Install
 
-cc-runtime is in early development. The implementation language and the way it plugs into Claude Code are still open — see [AGENTS.md](AGENTS.md) for the current state. There is nothing to install yet; this section gets the one-command install path the moment the first release ships.
+cc-runtime is in early development. It is written in **Go** and built on the [cc-interact](https://github.com/yasyf/cc-interact) substrate, shipping as a Claude Code plugin — MCP channel tools plus hooks. It is still pre-release: there is no published install path yet, and this section gets the one-command install the moment the first release ships.
 
 ## Quickstart
 

@@ -14,10 +14,10 @@ The concrete style rules for this repository.
 4. **Match surrounding code.** Follow this guide first, then the file you're in,
    then the module. If surrounding code violates this guide, fix it.
 
-Language-specific rules — naming, organization, error-handling idioms, each with
-a Good/Bad example — land here once the implementation language is chosen. Until
-then the language-agnostic sections below govern. When adding them, prepend any
-language idioms to the Core Principles above.
+The implementation language is **Go**. Language-specific rules — naming,
+organization, error-handling idioms, each with a Good/Bad example — land here as
+the first packages do; until then the language-agnostic sections below govern.
+When adding them, prepend any Go idioms to the Core Principles above.
 
 ## Error Handling
 

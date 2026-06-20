@@ -14,3 +14,12 @@
 # Python bytecode (guard hooks are Python even in non-Python repos)
 __pycache__/
 *.py[cod]
+
+# Go
+/cc-runtime
+*.test
+*.out
+
+# Plugin binary (built locally or installed at runtime, never committed)
+/plugin/bin/*
+!/plugin/bin/.gitkeep
