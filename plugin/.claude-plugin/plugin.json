@@ -1,0 +1,22 @@
+{
+  "name": "cc-runtime",
+  "description": "Backs Claude Code's harness-injected tools — AskUserQuestion, PushNotification, and more — with implementations that outlive a single prompt: questions and notifications carry full context, reach you on a web app or phone, and persist for the session.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Yasyf Mohamedali",
+    "email": "yasyfm@gmail.com"
+  },
+  "homepage": "https://github.com/yasyf/cc-runtime",
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "mcpServers": {
+    "cc-runtime": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/scripts/mcp-channel.sh"
+    }
+  },
+  "channels": [
+    {
+      "server": "cc-runtime",
+      "displayName": "cc-runtime"
+    }
+  ]
+}
