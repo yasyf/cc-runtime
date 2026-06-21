@@ -26,6 +26,15 @@ Use the cc-runtime ask tool instead of the native AskUserQuestion tool, and the 
 
 A channel.hello tag arrives once when the channel attaches, and a channel.changed tag marks a connection-presence change. Both are status signals that confirm the channel is live. They carry no task and need no reply, narration, or tool call. When one arrives, continue whatever you were doing. If the conversation so far holds nothing but this handshake, there is no request yet, so wait for the human instead of asking what they want.`
 
+// wrappedInstructions is the trimmed instructions returned when the session was
+// launched via `cc-runtime wrap`. The wrap launch already removed the native
+// AskUserQuestion/PushNotification and steered the agent to ask/notify in its
+// appended system prompt, so the soft-steer in channelInstructions would be
+// redundant. Only the channel-hello/status guidance remains.
+const wrappedInstructions = `This MCP server is the cc-runtime interaction channel: its ask and notify tools reach the human on the web app or phone, persist for the session, and (for ask) block your edits until the human responds.
+
+A channel.hello tag arrives once when the channel attaches, and a channel.changed tag marks a connection-presence change. Both are status signals that confirm the channel is live. They carry no task and need no reply, narration, or tool call. When one arrives, continue whatever you were doing. If the conversation so far holds nothing but this handshake, there is no request yet, so wait for the human instead of asking what they want.`
+
 // askPollInterval paces the inline long-poll between OpAnswerPoll round-trips.
 const askPollInterval = 750 * time.Millisecond
 
@@ -148,10 +157,11 @@ func awaitAnswer(ctx context.Context, client *daemon.Client, session, scope stri
 // ChannelTools advertises cc-runtime's interaction tools to the agent's MCP
 // channel. The handlers round-trip to the daemon because the channel server is a
 // separate stdio process that cannot Append directly; the ask tool blocks
-// inline, long-polling for the human's answer.
-func ChannelTools(_ context.Context, session, scope string) ([]channel.Tool, string, string, error) {
+// inline, long-polling for the human's answer. pid is Claude's window pid (the
+// channel server runs as a child of claude, so its own os.Getpid is the wrong
+// owner); it stamps ClaudePID on every envelope so subjects bind to the window.
+func ChannelTools(_ context.Context, session, scope string, pid int) ([]channel.Tool, string, string, error) {
 	client := daemon.NewClient(AppPaths().SocketPath())
-	pid := os.Getpid()
 
 	ask := channel.Tool{
 		Name:        "ask",
@@ -200,5 +210,21 @@ func ChannelTools(_ context.Context, session, scope string) ([]channel.Tool, str
 		},
 	}
 
-	return []channel.Tool{ask, notify}, notifyMethod, channelInstructions, nil
+	instructions := channelInstructions
+	if launchedViaWrap() {
+		instructions = wrappedInstructions
+	}
+	return []channel.Tool{ask, notify}, notifyMethod, instructions, nil
+}
+
+// launchedViaWrap reports whether this session was launched via `cc-runtime
+// wrap`. It is the single detection seam: the wrap launch sets WrapEnvVar to the
+// WrapSentinel in the child environment, and that variable propagates to the
+// MCP-launched channel subprocess the same way CLAUDE_CODE_SESSION_ID does.
+//
+// The transcript was the original source, but a real run proved Claude Code does
+// not persist --append-system-prompt content (and so the sentinel) into the
+// session .jsonl, so the env var is the detection of record.
+func launchedViaWrap() bool {
+	return os.Getenv(WrapEnvVar) == WrapSentinel
 }

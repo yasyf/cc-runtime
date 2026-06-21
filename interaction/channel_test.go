@@ -2,6 +2,7 @@ package interaction
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -24,6 +25,14 @@ type channelHarness struct {
 }
 
 func newChannelHarness(t *testing.T) *channelHarness {
+	return newChannelHarnessWithAlive(t, func(int) bool { return true })
+}
+
+// newChannelHarnessWithAlive builds the channel harness with a caller-supplied
+// WindowAlive so a test can make liveness discriminating (true only for the
+// designated claude pids), exercising the daemon's real ownership policy instead
+// of the always-alive stub that masks window-ownership bugs.
+func newChannelHarnessWithAlive(t *testing.T, alive func(int) bool) *channelHarness {
 	t.Helper()
 	t.Setenv("HOME", shortTempHome(t))
 	p := AppPaths()
@@ -33,7 +42,7 @@ func newChannelHarness(t *testing.T) *channelHarness {
 		Paths:           p,
 		Version:         "v0.0.0-test",
 		ActiveStatuses:  ActiveStatuses,
-		WindowAlive:     func(int) bool { return true },
+		WindowAlive:     alive,
 		Gate:            Gate(),
 		GateErrorReason: GateErrorReason,
 		Migrate:         Migrate,
@@ -75,9 +84,9 @@ func newChannelHarness(t *testing.T) *channelHarness {
 	return &channelHarness{t: t, client: client, port: lr.HTTPPort}
 }
 
-func askTool(t *testing.T) channel.Tool {
+func askTool(t *testing.T, session string, pid int) channel.Tool {
 	t.Helper()
-	tools, method, instructions, err := ChannelTools(context.Background(), testSession, testScope)
+	tools, method, instructions, err := ChannelTools(context.Background(), session, testScope, pid)
 	if err != nil {
 		t.Fatalf("ChannelTools: %v", err)
 	}
@@ -163,7 +172,7 @@ func sampleArgs(t *testing.T) json.RawMessage {
 
 func TestAskToolLongPollReturnsHumanAnswer(t *testing.T) {
 	h := newChannelHarness(t)
-	ask := askTool(t)
+	ask := askTool(t, testSession, testPID)
 
 	go submitAnswerFor(t, h.client, "ship")
 
@@ -241,4 +250,243 @@ func TestHumanAnswerNotSuppressedByExcludeAgentOrigin(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("OriginHuman answer was suppressed by ExcludeOrigin=OriginAgent; it must stream through")
 	}
+}
+
+// subjectClaudePID reads a subject's window pid straight from the daemon's
+// SQLite, the source of truth the resolver binds against. A second read-only
+// connection sees committed rows under WAL.
+func subjectClaudePID(t *testing.T, subjectID string) int {
+	t.Helper()
+	db, err := sql.Open("sqlite", AppPaths().DBPath()+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
+	if err != nil {
+		t.Fatalf("open daemon db: %v", err)
+	}
+	defer db.Close()
+	var pid int
+	if err := db.QueryRow(`SELECT claude_pid FROM subjects WHERE id=?`, subjectID).Scan(&pid); err != nil {
+		t.Fatalf("read claude_pid for subject %s: %v", subjectID, err)
+	}
+	return pid
+}
+
+// awaitingSubjectID polls the scope until exactly one subject is awaiting and
+// returns its id, so a test can inspect the subject the real ask handler created.
+func awaitingSubjectID(t *testing.T, client *daemon.Client, scope string) string {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		r := mustDo(t, client, daemon.Envelope{Op: OpList, Scope: scope})
+		var lr listReply
+		if err := json.Unmarshal(r.Body, &lr); err != nil {
+			t.Fatalf("unmarshal list: %v", err)
+		}
+		for _, s := range lr.Subjects {
+			if s.Status == StatusAwaiting {
+				return s.SubjectID
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no awaiting subject appeared in scope %q", scope)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestAskToolSubjectKeyedToClaudePID drives the real ask tool with a claude
+// window pid distinct from the channel/test process's own getpid, then asserts
+// the subject the daemon created binds to the passed-in claude pid — not the
+// channel server's getpid. Before the fix (ChannelTools stamped os.Getpid),
+// the subject bound to the test process and this assertion would fail.
+func TestAskToolSubjectKeyedToClaudePID(t *testing.T) {
+	const claudePID = 991337 // a fabricated claude window pid, never == os.Getpid()
+	h := newChannelHarness(t)
+	ask := askTool(t, testSession, claudePID)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ask.Handler(context.Background(), sampleArgs(t))
+	}()
+
+	subjectID := awaitingSubjectID(t, h.client, testScope)
+	if got := subjectClaudePID(t, subjectID); got != claudePID {
+		t.Fatalf("subject %s claude_pid = %d, want the passed-in claude window pid %d (not the channel server's getpid)", subjectID, got, claudePID)
+	}
+
+	// Unblock the handler goroutine so teardown is clean.
+	submitAnswerFor(t, h.client, "ship")
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ask handler did not return after the answer was submitted")
+	}
+}
+
+// TestNoCrossWindowTheftWhileOwnerLives proves the window-ownership invariant:
+// while window A's claude process is alive, a second window B in the same scope
+// must NOT adopt A's awaiting subject. WindowAlive is discriminating (true only
+// for the two real claude pids), so the daemon's Policy.Held reads A's subject
+// as held and refuses adoption. Before the fix, ChannelTools stamped the channel
+// server's getpid — which WindowAlive reports dead — so Held was false and B
+// stole A's awaiting subject and its open question.
+func TestNoCrossWindowTheftWhileOwnerLives(t *testing.T) {
+	const (
+		pidA       = 700001
+		pidB       = 700002
+		sessionA   = "sess-A"
+		sessionB   = "sess-B"
+		theftScope = "/scope/theft"
+	)
+	alive := map[int]bool{pidA: true, pidB: true}
+	h := newChannelHarnessWithAlive(t, func(pid int) bool { return alive[pid] })
+
+	// Window A asks through the real handler; its subject goes awaiting, keyed to pidA.
+	askA := askToolFor(t, sessionA, pidA, theftScope)
+	doneA := make(chan struct{})
+	go func() {
+		defer close(doneA)
+		askA.Handler(context.Background(), sampleArgs(t))
+	}()
+	subjectA := awaitingSubjectID(t, h.client, theftScope)
+	if got := subjectClaudePID(t, subjectA); got != pidA {
+		t.Fatalf("A's subject claude_pid = %d, want %d", got, pidA)
+	}
+
+	// Window B (different claude pid, same scope) starts while A's owner is alive.
+	rB := mustDo(t, h.client, daemon.Envelope{Op: OpStart, Session: sessionB, ClaudePID: pidB, Scope: theftScope})
+	if rB.SubjectID == subjectA {
+		t.Fatalf("window B adopted A's awaiting subject %s while A's owner (pid %d) is alive", subjectA, pidA)
+	}
+
+	// A's subject is untouched: still keyed to pidA and still awaiting.
+	if got := subjectClaudePID(t, subjectA); got != pidA {
+		t.Fatalf("after B started, A's subject claude_pid = %d, want it untouched at %d", got, pidA)
+	}
+	if got := subjectStatus(t, h.client, theftScope, subjectA); got != StatusAwaiting {
+		t.Fatalf("after B started, A's subject status = %q, want %q (its open question must remain)", got, StatusAwaiting)
+	}
+
+	// Unblock A's handler goroutine for clean teardown.
+	answerSubject(t, h.client, theftScope, subjectA, "ship")
+	select {
+	case <-doneA:
+	case <-time.After(5 * time.Second):
+		t.Fatal("A's ask handler did not return after its answer was submitted")
+	}
+}
+
+// TestFreshWindowDoesNotInheritDeadOwnersAwaitingSubject proves the cross-window
+// adoption invariant: an awaiting subject is never adopted, even once its owning
+// window dies. Window A asks (subject goes awaiting, keyed to pidA), then A's
+// window DIES (WindowAlive(pidA) returns false). A fresh window B — different
+// pid, different session, same scope — issues OpStart and must get its own NEW,
+// IDLE subject rather than inheriting A's awaiting one and its open-question
+// edit-block.
+//
+// With StatusAwaiting in ActiveStatuses this fails: A's dead window makes
+// Policy.Held false, A's awaiting subject is adoptable, and B adopts it (B's
+// OpStart returns subjectA, still awaiting). Dropping awaiting from the adoptable
+// set keeps A's awaiting subject out of FindAdoptableByScope, so B creates fresh.
+func TestFreshWindowDoesNotInheritDeadOwnersAwaitingSubject(t *testing.T) {
+	const (
+		pidA      = 800001
+		pidB      = 800002
+		sessionA  = "sess-A"
+		sessionB  = "sess-B"
+		deadScope = "/scope/dead-owner"
+	)
+	// A's window starts alive (so its ask binds to pidA), B's window is alive.
+	alive := map[int]bool{pidA: true, pidB: true}
+	h := newChannelHarnessWithAlive(t, func(pid int) bool { return alive[pid] })
+
+	// Window A asks through the real handler; its subject goes awaiting, keyed to pidA.
+	askA := askToolFor(t, sessionA, pidA, deadScope)
+	doneA := make(chan struct{})
+	go func() {
+		defer close(doneA)
+		askA.Handler(context.Background(), sampleArgs(t))
+	}()
+	subjectA := awaitingSubjectID(t, h.client, deadScope)
+	if got := subjectClaudePID(t, subjectA); got != pidA {
+		t.Fatalf("A's subject claude_pid = %d, want %d", got, pidA)
+	}
+
+	// A's window now DIES, unanswered: its claude process is gone.
+	alive[pidA] = false
+
+	// Window B (different claude pid, different session, same scope) starts.
+	rB := mustDo(t, h.client, daemon.Envelope{Op: OpStart, Session: sessionB, ClaudePID: pidB, Scope: deadScope})
+	if rB.SubjectID == "" {
+		t.Fatal("window B's start returned no subject id")
+	}
+	if rB.SubjectID == subjectA {
+		t.Fatalf("window B adopted dead window A's awaiting subject %s; a fresh window must not inherit a stale open-question block", subjectA)
+	}
+	if got := subjectStatus(t, h.client, deadScope, rB.SubjectID); got != StatusIdle {
+		t.Fatalf("window B's subject status = %q, want %q (a fresh window starts editable)", got, StatusIdle)
+	}
+
+	// A's awaiting subject is untouched: its open question still stands, answerable
+	// by subject_id+question_id (and visible in the TUI listing).
+	if got := subjectStatus(t, h.client, deadScope, subjectA); got != StatusAwaiting {
+		t.Fatalf("after B started, A's subject status = %q, want %q (its open question must remain answerable)", got, StatusAwaiting)
+	}
+
+	// Unblock A's handler goroutine for clean teardown.
+	answerSubject(t, h.client, deadScope, subjectA, "ship")
+	select {
+	case <-doneA:
+	case <-time.After(5 * time.Second):
+		t.Fatal("A's ask handler did not return after its answer was submitted")
+	}
+}
+
+// askToolFor is askTool with an explicit scope, for tests that drive more than
+// one window in a non-default scope.
+func askToolFor(t *testing.T, session string, pid int, scope string) channel.Tool {
+	t.Helper()
+	tools, _, _, err := ChannelTools(context.Background(), session, scope, pid)
+	if err != nil {
+		t.Fatalf("ChannelTools: %v", err)
+	}
+	for _, tl := range tools {
+		if tl.Name == "ask" {
+			return tl
+		}
+	}
+	t.Fatal("ask tool not advertised")
+	return channel.Tool{}
+}
+
+// subjectStatus returns a named subject's status from the scope listing.
+func subjectStatus(t *testing.T, client *daemon.Client, scope, subjectID string) string {
+	t.Helper()
+	r := mustDo(t, client, daemon.Envelope{Op: OpList, Scope: scope})
+	var lr listReply
+	if err := json.Unmarshal(r.Body, &lr); err != nil {
+		t.Fatalf("unmarshal list: %v", err)
+	}
+	for _, s := range lr.Subjects {
+		if s.SubjectID == subjectID {
+			return s.Status
+		}
+	}
+	t.Fatalf("subject %s not found in scope %q", subjectID, scope)
+	return ""
+}
+
+// answerSubject answers the named subject's first open question in the scope.
+func answerSubject(t *testing.T, client *daemon.Client, scope, subjectID, selected string) {
+	t.Helper()
+	pb, _ := json.Marshal(subjectBody{SubjectID: subjectID})
+	pr := mustDo(t, client, daemon.Envelope{Op: OpPending, Scope: scope, Body: pb})
+	var pend pendingReply
+	if err := json.Unmarshal(pr.Body, &pend); err != nil {
+		t.Fatalf("unmarshal pending: %v", err)
+	}
+	if len(pend.Questions) == 0 {
+		t.Fatalf("subject %s has no open question to answer", subjectID)
+	}
+	ab, _ := json.Marshal(AnswerPayload{SubjectID: subjectID, QuestionID: pend.Questions[0].QuestionID, Selected: []string{selected}})
+	mustDo(t, client, daemon.Envelope{Op: OpAnswer, Scope: scope, Body: ab})
 }

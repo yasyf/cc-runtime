@@ -30,8 +30,10 @@ func Root() *cobra.Command {
 		cmd.ChannelAckCmd(d),
 		cmd.ChannelCmd(d),
 		CaptureNotificationCmd(d),
+		CaptureAskCmd(d),
 		AnswerCmd(d),
 		startCmd(d),
+		WrapCmd(),
 		tui.TUICmd(d),
 	)
 	return root

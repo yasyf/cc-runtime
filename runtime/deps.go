@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 
+	"github.com/yasyf/cc-interact/channel"
 	"github.com/yasyf/cc-interact/cmd"
 	"github.com/yasyf/cc-interact/daemon"
 	"github.com/yasyf/cc-interact/paths"
@@ -30,6 +31,8 @@ func deps() cmd.Deps {
 		WindowAlive:            live,
 		TerminalEvent:          func(string) bool { return false },
 		Serve:                  serve,
-		ChannelTools:           interaction.ChannelTools,
+		ChannelTools: func(ctx context.Context, session, scope string) ([]channel.Tool, string, string, error) {
+			return interaction.ChannelTools(ctx, session, scope, claudePID())
+		},
 	}
 }

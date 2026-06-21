@@ -423,3 +423,67 @@ func TestE2ECaptureNotificationNeverBlocks(t *testing.T) {
 	}
 	assertAllows(t, e, "after capture-notification on an idle subject")
 }
+
+// pending reads the subject's still-open questions via OpPending — the same
+// projection the TUI reseeds from and the gate's open-count keys off — so the
+// test can assert a captured native question never lands in the answerable queue.
+func (e *e2e) pending(subjectID string) []interaction.PendingQuestion {
+	e.t.Helper()
+	body, _ := json.Marshal(map[string]any{"subject_id": subjectID})
+	r := e.do(daemon.Envelope{Op: interaction.OpPending, Scope: e2eScope, Body: body})
+	if !r.OK {
+		e.t.Fatalf("pending: %s", r.Error)
+	}
+	var reply struct {
+		Questions []interaction.PendingQuestion `json:"questions"`
+	}
+	if err := json.Unmarshal(r.Body, &reply); err != nil {
+		e.t.Fatalf("unmarshal pending: %v", err)
+	}
+	return reply.Questions
+}
+
+// TestE2ECaptureQuestionNeverBlocks asserts a captured native AskUserQuestion on
+// an idle subject is a pure system-origin log append: the subject stays idle
+// (NOT awaiting), the gate keeps allowing edits, and — critically — it never
+// projects a pending_questions row, so it never becomes answerable or countable
+// in the TUI. It is a mirror for visibility, not an open cc-runtime question.
+func TestE2ECaptureQuestionNeverBlocks(t *testing.T) {
+	e := newE2E(t)
+
+	subjectID := e.start()
+	if got := e.status(subjectID); got != interaction.StatusIdle {
+		t.Fatalf("status after start = %q, want %q", got, interaction.StatusIdle)
+	}
+	if open := e.pending(subjectID); len(open) != 0 {
+		t.Fatalf("a fresh subject has %d pending questions, want 0", len(open))
+	}
+
+	body, _ := json.Marshal(interaction.QuestionPayload{
+		Header:      "Approach",
+		Prompt:      "which deploy strategy?",
+		MultiSelect: false,
+		Options:     []interaction.Option{{Label: "blue-green"}, {Label: "canary"}},
+	})
+	r := e.do(daemon.Envelope{
+		Op: interaction.OpCaptureQuestion, Session: e2eSession, ClaudePID: e2ePID, Scope: e2eScope, Body: body,
+	})
+	if !r.OK {
+		t.Fatalf("capture-question: %s", r.Error)
+	}
+	if r.SubjectID != subjectID {
+		t.Fatalf("capture-question resolved subject %q, want %q", r.SubjectID, subjectID)
+	}
+
+	// The capture is a mirror, never an open question: status is unchanged.
+	if got := e.status(subjectID); got != interaction.StatusIdle {
+		t.Fatalf("status after capture-question = %q, want unchanged %q", got, interaction.StatusIdle)
+	}
+	// No pending row: the question is not answerable and does not inflate the
+	// open-question count the TUI reseeds from.
+	if open := e.pending(subjectID); len(open) != 0 {
+		t.Fatalf("capture-question projected %d pending questions, want 0 (it is a mirror, not an open question)", len(open))
+	}
+	// The gate still allows: a mirror never engages the edit gate.
+	assertAllows(t, e, "after capture-question on an idle subject")
+}

@@ -9,6 +9,7 @@ require (
 	github.com/shirou/gopsutil/v4 v4.26.5
 	github.com/spf13/cobra v1.10.2
 	github.com/yasyf/cc-interact v0.1.4
+	modernc.org/sqlite v1.52.0
 )
 
 require (
@@ -49,5 +50,4 @@ require (
 	modernc.org/libc v1.72.3 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
-	modernc.org/sqlite v1.52.0 // indirect
 )

@@ -3,9 +3,35 @@ package interaction
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
+
+	sqlite "modernc.org/sqlite"
 )
+
+// SQLite result codes for a contended write. They are part of the SQLite ABI
+// and stable across platforms, so we name them here rather than pull in the
+// heavyweight modernc.org/sqlite/lib generated package for two integers.
+const (
+	sqliteBusy   = 5
+	sqliteLocked = 6
+)
+
+// cleanupTimeout bounds the post-Append projection writes. They run on a
+// daemon-owned context derived from context.Background, not hc.Ctx (the daemon's
+// shared root, cancelled only on daemon SHUTDOWN). That lets the projection of a
+// durable question or answer finish even as hc.Ctx is being torn down by
+// shutdown, rather than abandoning it mid-projection and wedging the gate.
+const cleanupTimeout = 5 * time.Second
+
+// busyRetries bounds the SQLITE_BUSY/LOCKED retry on a post-Append projection
+// write. The store serializes writes on a single connection with a busy_timeout,
+// so contention is rare; a few quick attempts cover the remaining window.
+const busyRetries = 5
+
+// busyBackoff is the pause between projection-write retries on a contended DB.
+const busyBackoff = 2 * time.Millisecond
 
 // PendingQuestion is one open question projected for the agent or TUI.
 type PendingQuestion struct {
@@ -23,9 +49,59 @@ type ListedSubject struct {
 
 func unix(t time.Time) int64 { return t.UnixMilli() }
 
-// insertPendingAndAwait projects a new question and flips the subject to
-// awaiting in one transaction so the gate signal and the projection move
-// together.
+// cleanupCtx returns a short daemon-owned context for the post-Append projection
+// writes. Deriving it from context.Background — not hc.Ctx, the daemon's shared
+// root cancelled only on shutdown — lets the projection complete within
+// cleanupTimeout even while hc.Ctx is being cancelled by daemon shutdown, so a
+// durable question or answer is not abandoned mid-projection.
+func cleanupCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), cleanupTimeout)
+}
+
+// isBusy reports whether err is a transient SQLITE_BUSY/LOCKED contention error
+// worth retrying. Detection goes through modernc.org/sqlite's *sqlite.Error and
+// its Code(), so the narrow retry never swallows a constraint violation, a
+// disk-full, or any other terminal error.
+func isBusy(err error) bool {
+	var serr *sqlite.Error
+	if !errors.As(err, &serr) {
+		return false
+	}
+	code := serr.Code()
+	return code == sqliteBusy || code == sqliteLocked
+}
+
+// withBusyRetry runs a post-Append projection tx, retrying only on a transient
+// SQLITE_BUSY/LOCKED. It does not retry constraint violations, disk-full,
+// unknown-question, or an already-expired context — those surface immediately so
+// the caller can fail closed.
+func withBusyRetry(ctx context.Context, fn func() error) error {
+	var err error
+	for attempt := 0; attempt < busyRetries; attempt++ {
+		if err = fn(); err == nil {
+			return nil
+		}
+		if !isBusy(err) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(busyBackoff):
+		}
+	}
+	return err
+}
+
+// insertPendingAndAwait projects a freshly-published question AND engages the
+// gate in ONE transaction: INSERT the open row, then UPDATE the subject to
+// awaiting. Atomicity is the gate invariant — a concurrent handleAnswer's
+// recordAnswer (also one tx) can only interleave at a tx boundary, never between
+// these two statements, so it never observes an open row with the subject still
+// idle nor idles a subject that has this open row. awaiting is unconditionally
+// correct here because the very same tx just inserted an unanswered row.
+// A duplicate row (composite PK) or any error rolls the whole tx back, leaving
+// both the row and the status untouched.
 func insertPendingAndAwait(ctx context.Context, db *sql.DB, subjectID string, questionID int64, header, payload string) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -50,10 +126,52 @@ func insertPendingAndAwait(ctx context.Context, db *sql.DB, subjectID string, qu
 	return nil
 }
 
+// setSubjectStatus flips a subject's lifecycle status. handleAsk uses it only as
+// the fail-CLOSED fallback when insertPendingAndAwait fails: the question is
+// already durable, so the gate must engage even though the open row never landed.
+func setSubjectStatus(ctx context.Context, db *sql.DB, subjectID, status string) error {
+	if _, err := db.ExecContext(ctx,
+		`UPDATE subjects SET status=?, updated_at=? WHERE id=?`,
+		status, unix(time.Now()), subjectID); err != nil {
+		return fmt.Errorf("set subject status %s: %w", status, err)
+	}
+	return nil
+}
+
+// questionState reports whether a (subject, question) pair is known to the
+// projection and, if so, whether it is already answered. handleAnswer calls it
+// before any durable Append so an unknown target never reaches the log and an
+// already-answered target is an idempotent no-op.
+func questionState(ctx context.Context, db *sql.DB, subjectID string, questionID int64) (known, answered bool, err error) {
+	var ans int
+	row := db.QueryRowContext(ctx,
+		`SELECT answered FROM pending_questions WHERE subject_id=? AND question_id=?`,
+		subjectID, questionID)
+	switch err := row.Scan(&ans); {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, false, nil
+	case err != nil:
+		return false, false, fmt.Errorf("question state: %w", err)
+	}
+	return true, ans == 1, nil
+}
+
+// openCount returns a subject's open (unanswered) question count.
+func openCount(ctx context.Context, db *sql.DB, subjectID string) (int, error) {
+	var open int
+	if err := db.QueryRowContext(ctx,
+		`SELECT count(*) FROM pending_questions WHERE subject_id=? AND answered=0`, subjectID).Scan(&open); err != nil {
+		return 0, fmt.Errorf("count open questions: %w", err)
+	}
+	return open, nil
+}
+
 // recordAnswer marks a question answered and, when it was the last open one,
 // flips the subject back to idle — both in one transaction so a concurrent ask
-// cannot interleave and leak the gate. The returned bool reports whether the
-// subject idled.
+// cannot interleave and leak the gate. The UPDATE carries AND answered=0 as the
+// real idempotency guard: a retried or racing answer that finds the row already
+// answered makes no write and idles only on the count. The returned bool reports
+// whether the subject idled.
 func recordAnswer(ctx context.Context, db *sql.DB, subjectID string, questionID int64, answer string) (bool, error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -62,18 +180,10 @@ func recordAnswer(ctx context.Context, db *sql.DB, subjectID string, questionID 
 	defer tx.Rollback()
 
 	now := unix(time.Now())
-	res, err := tx.ExecContext(ctx,
-		`UPDATE pending_questions SET answered=1, answer=? WHERE subject_id=? AND question_id=?`,
-		answer, subjectID, questionID)
-	if err != nil {
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE pending_questions SET answered=1, answer=? WHERE subject_id=? AND question_id=? AND answered=0`,
+		answer, subjectID, questionID); err != nil {
 		return false, fmt.Errorf("mark answered: %w", err)
-	}
-	affected, err := res.RowsAffected()
-	if err != nil {
-		return false, fmt.Errorf("mark answered rows: %w", err)
-	}
-	if affected == 0 {
-		return false, fmt.Errorf("answer targets unknown question (subject=%s id=%d)", subjectID, questionID)
 	}
 	var open int
 	if err := tx.QueryRowContext(ctx,

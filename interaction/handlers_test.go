@@ -37,6 +37,7 @@ const (
 type harness struct {
 	t      *testing.T
 	client *daemon.Client
+	paths  paths.Paths
 }
 
 func newHarness(t *testing.T) *harness {
@@ -79,7 +80,7 @@ func newHarness(t *testing.T) *harness {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	return &harness{t: t, client: client}
+	return &harness{t: t, client: client, paths: p}
 }
 
 func (h *harness) do(env daemon.Envelope) daemon.Reply {
