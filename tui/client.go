@@ -32,39 +32,80 @@ type resolution struct {
 // resolveAwaiting asks the daemon for the scope's subjects and picks the single
 // awaiting one. found is false when no subject is awaiting yet, so the caller can
 // keep polling whether the agent asks before or after the human opens the TUI.
-func resolveAwaiting(ctx context.Context, client *daemon.Client, scope string) (res resolution, found bool, err error) {
+// multiple is true when more than one subject is awaiting — a transient
+// scope-in-flux state the caller surfaces as an informative (non-latching) note
+// rather than picking one arbitrarily.
+func resolveAwaiting(ctx context.Context, client *daemon.Client, scope string) (res resolution, found, multiple bool, err error) {
 	reqBody, _ := json.Marshal(map[string]string{"scope": scope})
 	r, err := client.Do(ctx, daemon.Envelope{Op: interaction.OpList, Scope: scope, Body: reqBody})
 	if err != nil {
-		return resolution{}, false, err
+		return resolution{}, false, false, err
 	}
 	if !r.OK {
-		return resolution{}, false, errors.New(r.Error)
+		return resolution{}, false, false, errors.New(r.Error)
 	}
 	var lr listReply
 	if err := json.Unmarshal(r.Body, &lr); err != nil {
-		return resolution{}, false, err
+		return resolution{}, false, false, err
 	}
-	return pickAwaiting(lr)
+	res, found, multiple = pickAwaiting(lr)
+	return res, found, multiple, nil
+}
+
+// pendingReply mirrors the OpPending daemon reply: the subject's still-open
+// questions projected from pending_questions, independent of any stream cursor.
+type pendingReply struct {
+	Questions []interaction.PendingQuestion `json:"questions"`
+}
+
+// fetchPending asks the daemon for the subject's still-open questions via
+// OpPending — the durable projection the daemon owns, not the per-consumer stream
+// cursor — so a relaunch reseeds every open question regardless of where the
+// resumed stream's cursor landed.
+func fetchPending(ctx context.Context, client *daemon.Client, scope, subjectID string) ([]question, error) {
+	reqBody, _ := json.Marshal(map[string]string{"subject_id": subjectID})
+	r, err := client.Do(ctx, daemon.Envelope{Op: interaction.OpPending, Scope: scope, Body: reqBody})
+	if err != nil {
+		return nil, err
+	}
+	if !r.OK {
+		return nil, errors.New(r.Error)
+	}
+	var pr pendingReply
+	if err := json.Unmarshal(r.Body, &pr); err != nil {
+		return nil, err
+	}
+	out := make([]question, 0, len(pr.Questions))
+	for _, pq := range pr.Questions {
+		q, err := parseQuestion(pq.QuestionID, pq.Payload)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, q)
+	}
+	return out, nil
 }
 
 // pickAwaiting selects the single awaiting subject from a list reply. It is split
-// out so the resolution logic is testable without a live socket.
-func pickAwaiting(lr listReply) (resolution, bool, error) {
+// out so the resolution logic is testable without a live socket. More than one
+// awaiting subject is a transient scope-in-flux state, not a fatal error: found
+// is false and multiple is true so the caller keeps polling — surfacing an
+// informative note while it waits — until the scope settles to one subject.
+func pickAwaiting(lr listReply) (res resolution, found, multiple bool) {
 	awaiting := ""
 	for _, s := range lr.Subjects {
 		if s.Status != interaction.StatusAwaiting {
 			continue
 		}
 		if awaiting != "" {
-			return resolution{}, false, errors.New("multiple awaiting subjects in scope; the TUI answers a single subject")
+			return resolution{}, false, true
 		}
 		awaiting = s.SubjectID
 	}
 	if awaiting == "" {
-		return resolution{}, false, nil
+		return resolution{}, false, false
 	}
-	return resolution{SubjectID: awaiting, HTTPPort: lr.HTTPPort}, true, nil
+	return resolution{SubjectID: awaiting, HTTPPort: lr.HTTPPort}, true, false
 }
 
 // listPort re-resolves the daemon's current HTTP events port via OpList,

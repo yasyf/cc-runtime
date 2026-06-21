@@ -39,7 +39,11 @@ func (m Model) render() string {
 	b.WriteString(titleStyle.Render("cc-runtime"))
 	b.WriteString("  ")
 	if !m.resolved {
-		b.WriteString(waitingStyle.Render("waiting for an awaiting subject…"))
+		if m.waitNote != "" {
+			b.WriteString(urgentStyle.Render(m.waitNote))
+		} else {
+			b.WriteString(waitingStyle.Render("waiting for an awaiting subject…"))
+		}
 		b.WriteString("\n\n")
 		b.WriteString(m.renderFeed())
 		b.WriteString(m.renderHints())

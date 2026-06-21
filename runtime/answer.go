@@ -53,29 +53,48 @@ func resolveAwaiting(c *cobra.Command, d cmd.Deps, scope string) (string, error)
 	return awaiting, nil
 }
 
-func resolveQuestion(c *cobra.Command, d cmd.Deps, scope, subjectID string, want int64) (int64, error) {
-	if want != 0 {
-		return want, nil
-	}
+// resolveQuestion picks the open question to answer and returns it whole, so the
+// caller can validate the answer against its options before submitting. When
+// want is non-zero it selects that question id from the pending set; otherwise it
+// requires exactly one open question.
+func resolveQuestion(c *cobra.Command, d cmd.Deps, scope, subjectID string, want int64) (interaction.PendingQuestion, error) {
 	body, _ := json.Marshal(map[string]string{"subject_id": subjectID})
 	r, err := d.NewClient().Do(c.Context(), daemon.Envelope{Op: interaction.OpPending, Scope: scope, Body: body})
 	if err != nil {
-		return 0, err
+		return interaction.PendingQuestion{}, err
 	}
 	if !r.OK {
-		return 0, errors.New(r.Error)
+		return interaction.PendingQuestion{}, errors.New(r.Error)
 	}
 	var pr pendingReply
 	if err := json.Unmarshal(r.Body, &pr); err != nil {
-		return 0, err
+		return interaction.PendingQuestion{}, err
 	}
 	if len(pr.Questions) == 0 {
-		return 0, errors.New("no open question for this subject")
+		return interaction.PendingQuestion{}, errors.New("no open question for this subject")
+	}
+	if want != 0 {
+		for _, q := range pr.Questions {
+			if q.QuestionID == want {
+				return q, nil
+			}
+		}
+		return interaction.PendingQuestion{}, fmt.Errorf("question %d is not open for this subject", want)
 	}
 	if len(pr.Questions) > 1 {
-		return 0, fmt.Errorf("%d open questions; pass --question to choose one", len(pr.Questions))
+		return interaction.PendingQuestion{}, fmt.Errorf("%d open questions; pass --question to choose one", len(pr.Questions))
 	}
-	return pr.Questions[0].QuestionID, nil
+	return pr.Questions[0], nil
+}
+
+// hasOptions reports whether the pending question carries selectable options, so
+// an answer with no selection is only legitimate when the question is free-text.
+func hasOptions(pq interaction.PendingQuestion) (bool, error) {
+	var p interaction.QuestionPayload
+	if err := json.Unmarshal([]byte(pq.Payload), &p); err != nil {
+		return false, fmt.Errorf("decode question payload: %w", err)
+	}
+	return len(p.Options) > 0, nil
 }
 
 // AnswerCmd is the non-interactive sibling of the TUI submit: it resolves the
@@ -103,9 +122,17 @@ func AnswerCmd(d cmd.Deps) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			questionID, err := resolveQuestion(c, d, scope, subjectID, question)
+			pq, err := resolveQuestion(c, d, scope, subjectID, question)
 			if err != nil {
 				return err
+			}
+			questionID := pq.QuestionID
+			withOptions, err := hasOptions(pq)
+			if err != nil {
+				return err
+			}
+			if withOptions && len(selected) == 0 && other == "" && notes == "" {
+				return fmt.Errorf("question %d has options; pass --select, --other, or --notes (refusing to submit an empty answer)", questionID)
 			}
 			body, _ := json.Marshal(interaction.AnswerPayload{
 				SubjectID:  subjectID,

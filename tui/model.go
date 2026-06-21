@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
@@ -29,12 +30,33 @@ type resolvedMsg struct{ Res resolution }
 // pollTickMsg fires the OpList refresh while no subject is awaiting yet.
 type pollTickMsg struct{}
 
+// multiAwaitingMsg fires when a poll finds more than one awaiting subject in the
+// scope — a transient, non-latching state. It carries an informative note the
+// View shows while waiting; the next poll that settles to one (or none) awaiting
+// subject clears it, so it never wedges the TUI.
+type multiAwaitingMsg struct{}
+
+// clearWaitNoteMsg fires when a poll finds the scope settled to zero awaiting
+// subjects, clearing any prior multi-awaiting hint so the generic waiting line
+// shows again.
+type clearWaitNoteMsg struct{}
+
+// multiAwaitingNote tells the human how to answer when the scope has more than
+// one awaiting subject, which pickAwaiting cannot disambiguate on its own.
+const multiAwaitingNote = "multiple awaiting subjects in this scope — answer via `cc-runtime answer` or close other windows"
+
 // submittedMsg reports the outcome of an OpAnswer round-trip for the given
 // question; Err is non-nil when the submit failed.
 type submittedMsg struct {
 	QuestionID int64
 	Err        error
 }
+
+// reseededMsg carries the subject's still-open questions read from the daemon's
+// OpPending projection at resolve time, so a relaunch re-fetches every open
+// question regardless of where the resumed stream cursor landed. A failed fetch
+// is non-fatal: the stream still delivers events, so reseed errors are dropped.
+type reseededMsg struct{ Questions []question }
 
 // errMsg surfaces a fatal resolution or stream error into the View.
 type errMsg struct{ Err error }
@@ -82,6 +104,11 @@ type Model struct {
 	notes textarea.Model
 	// notesFocused routes key input to the notes field instead of the option list.
 	notesFocused bool
+
+	// waitNote is a non-latching informational line shown while unresolved (e.g.
+	// the multiple-awaiting hint). Unlike err it never blocks the UI and clears on
+	// the next poll that settles, so a transient scope-in-flux can't wedge the TUI.
+	waitNote string
 
 	feed []notification
 
@@ -147,12 +174,34 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(m.resolveCmd(), pollTick())
 
+	case multiAwaitingMsg:
+		// Non-latching: surface the hint while still polling. The next poll that
+		// settles to one awaiting subject resolves and clears it.
+		m.waitNote = multiAwaitingNote
+		return m, nil
+
+	case clearWaitNoteMsg:
+		m.waitNote = ""
+		return m, nil
+
 	case resolvedMsg:
+		m.err = nil
+		m.waitNote = ""
 		m.resolved = true
 		m.res = msg.Res
 		if m.startStream != nil {
 			m.startStream(msg.Res)
 		}
+		return m, m.reseedCmd()
+
+	case reseededMsg:
+		for _, q := range msg.Questions {
+			if m.hasQuestion(q.ID) {
+				continue
+			}
+			m.questions = append(m.questions, q)
+		}
+		m.advance()
 		return m, nil
 
 	case liveEvent:
@@ -160,6 +209,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = msg.Err
 			return m, nil
 		}
+		m.err = nil
 		m.ingest(msg)
 		return m, m.readEvent()
 
@@ -168,6 +218,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = msg.Err
 			return m, nil
 		}
+		m.err = nil
 		m.answered[msg.QuestionID] = true
 		m.advance()
 		return m, nil
@@ -221,9 +272,26 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case " ", "x":
 		m.toggle(q)
 	case "enter":
+		if !m.canSubmit(q) {
+			return m, nil
+		}
 		return m, m.submitCmd()
 	}
 	return m, nil
+}
+
+// canSubmit reports whether the focused question's current answer is non-empty.
+// A question with options requires a selection or a note before enter releases
+// the gate, so an accidental enter can't idle the subject with an empty answer.
+// A question with no options is free-text-only and submits unconditionally.
+func (m Model) canSubmit(q question) bool {
+	if len(q.Payload.Options) == 0 {
+		return true
+	}
+	if len(m.selected[q.ID]) > 0 {
+		return true
+	}
+	return m.notes.Value() != ""
 }
 
 // focused returns the question the human is currently answering, if any.
@@ -318,20 +386,50 @@ func (m Model) submitCmd() tea.Cmd {
 	}
 }
 
-// resolveCmd runs one OpList round-trip; on an awaiting subject it emits a
-// resolvedMsg, otherwise nothing (the next tick retries).
+// resolveCmd runs one OpList round-trip; on a single awaiting subject it emits a
+// resolvedMsg. More than one awaiting subject emits a non-latching
+// multiAwaitingMsg (keep polling, but show the hint); a settled scope with zero
+// awaiting emits clearWaitNoteMsg so a prior multi-awaiting hint clears. A
+// daemon-unavailable error is transient — the documented version-skew swap leaves
+// the socket briefly unreachable — so it is swallowed to keep polling rather than
+// latched into a fatal error screen.
 func (m Model) resolveCmd() tea.Cmd {
 	scope := m.scope
 	client := m.client
 	return func() tea.Msg {
-		res, found, err := resolveAwaiting(context.Background(), client, scope)
+		res, found, multiple, err := resolveAwaiting(context.Background(), client, scope)
+		if errors.Is(err, daemon.ErrDaemonUnavailable) {
+			return nil
+		}
 		if err != nil {
 			return errMsg{Err: err}
 		}
-		if !found {
-			return nil
+		if found {
+			return resolvedMsg{Res: res}
 		}
-		return resolvedMsg{Res: res}
+		if multiple {
+			return multiAwaitingMsg{}
+		}
+		return clearWaitNoteMsg{}
+	}
+}
+
+// reseedCmd reads the resolved subject's still-open questions from the daemon's
+// OpPending projection and folds them in as a reseededMsg. It runs at resolve
+// time so a relaunch — where the resumed stream cursor has already advanced past
+// the open question's seq and delivers nothing — still re-surfaces every open
+// question. A fetch error is non-fatal: the live stream remains the primary
+// source, so a failed reseed yields no questions rather than a fatal error.
+func (m Model) reseedCmd() tea.Cmd {
+	scope := m.scope
+	client := m.client
+	subjectID := m.res.SubjectID
+	return func() tea.Msg {
+		qs, err := fetchPending(context.Background(), client, scope, subjectID)
+		if err != nil {
+			return reseededMsg{}
+		}
+		return reseededMsg{Questions: qs}
 	}
 }
 
