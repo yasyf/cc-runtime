@@ -3,5 +3,6 @@ source = "github:yasyf/cc-notes@latest"
 
 [packs.general]
 
+[packs.go]
 
 [packs.steering]

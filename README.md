@@ -1,29 +1,48 @@
-# cc-runtime
+# ![cc-runtime](docs/assets/readme-banner.webp)
 
-![cc-runtime banner](docs/assets/readme-banner.webp)
+**Stop babysitting the terminal. Your agent's questions ping your phone.** cc-runtime routes AskUserQuestion and PushNotification through a daemon; you tap an answer from web or phone and the run keeps moving.
 
-[![CI](https://img.shields.io/github/actions/workflow/status/yasyf/cc-runtime/ci.yml?branch=main&label=CI)](https://github.com/yasyf/cc-runtime/actions/workflows/ci.yml)
-[![License: PolyForm-Noncommercial-1.0.0](https://img.shields.io/badge/License-PolyForm--Noncommercial--1.0.0-blue.svg)](https://github.com/yasyf/cc-runtime/blob/main/LICENSE)
+[![CI](https://github.com/yasyf/cc-runtime/actions/workflows/ci.yml/badge.svg)](https://github.com/yasyf/cc-runtime/actions/workflows/ci.yml)
+[![License: PolyForm Noncommercial](https://img.shields.io/badge/license-PolyForm--Noncommercial--1.0.0-blue)](LICENSE)
 
-A runtime that supplies Claude Code's harness-injected tools — AskUserQuestion, PushNotification, and more — with richer context and remote delivery from a web app or phone.
+## Get started
 
-cc-runtime backs the tools the Claude Code harness injects into a session, replacing the thin built-ins with implementations that outlive any single prompt. A question carries the full reasoning and diff behind it and stays open until you answer; a notification reaches you wherever you are; and every interaction persists for the session instead of vanishing when the prompt ends. You see and act on all of it from one place, the terminal or a web app or your phone, so a long-running agent never stalls waiting for you to be at the keyboard.
+cc-runtime hasn't cut a release yet. The one-command install, a captured demo, and the agent paste block land here the moment the first one ships. Until then, the pitch above and [AGENTS.md](AGENTS.md) are the spec.
 
-## Install
+---
 
-cc-runtime is in early development. It is written in **Go** and built on the [cc-interact](https://github.com/yasyf/cc-interact) substrate, shipping as a Claude Code plugin — MCP channel tools plus hooks. It is still pre-release: there is no published install path yet, and this section gets the one-command install the moment the first release ships.
+## Use cases
 
-## Quickstart
+### Unblock a long-running agent without walking back to the keyboard
 
-The first release ships a copy-pasteable example here: an agent asking a question or firing a notification, and you handling it from the web app with the expected output shown end to end. Until then, the pitch above and [AGENTS.md](AGENTS.md) are the spec.
+A background agent that calls AskUserQuestion stalls in a terminal you're not looking at, and the question dies with the prompt. Launch the session wrapped instead:
 
-## What problems does this solve?
+```bash
+cc-runtime wrap claude
+```
 
-- **You aren't always at the terminal.** A background agent that calls AskUserQuestion or wants to notify you stalls or goes unseen until you walk back to the keyboard. cc-runtime routes the call to your phone, so you act on it from anywhere.
-- **Harness tools are thin and ephemeral.** The built-in AskUserQuestion shows a label and a few options, then it's gone if you miss it. cc-runtime attaches the full context behind each call and keeps it open for the whole session.
-- **Every tool reinvents how it reaches you.** AskUserQuestion, PushNotification, and the rest each ship their own minimal surface. cc-runtime gives them one runtime: a shared web and phone surface, consistent delivery, and a record of what happened.
-- **Approvals and alerts leave no trail.** When someone signs off on a change or an alert fires, nothing records it. cc-runtime logs who saw what, who approved what, and when.
+The wrapper strips the native ask/notify tools and steers the agent to cc-runtime's, so every question lands in the daemon and stays open until you answer, with an edit gate holding the agent's writes in the meantime. The TUI answers from any terminal that shares the scope today; the web and phone clients are the next two phases.
 
-## License
+### See the reasoning and diff behind every question, not just three option labels
 
-PolyForm-Noncommercial-1.0.0. See [LICENSE](https://github.com/yasyf/cc-runtime/blob/main/LICENSE).
+The native picker shows a header chip and a few option labels; you approve or reject without seeing what hinges on the answer. Open the answer surface instead:
+
+```bash
+cc-runtime tui
+```
+
+Each question card renders the agent's prompt, its reasoning, the option list with per-option previews, and the unified diff it wants you to weigh — the context the native tool never carries.
+
+### Keep a record of what was approved, and when
+
+An approval given in the native picker vanishes the moment the prompt ends. cc-runtime appends every question, answer, and notification to the subject's event log in the daemon's store, so the selected options, free-text notes, and timestamps outlive the session.
+
+---
+
+## How it's built
+
+cc-runtime is a Go daemon on the [cc-interact](https://github.com/yasyf/cc-interact) substrate, shipping as a Claude Code plugin: an MCP channel that exposes `ask` and `notify` in place of the native tools, plus hooks that mirror native AskUserQuestion and PushNotification calls into the event log and enforce the edit gate. The Bubble Tea TUI is the answer surface today; the web app and the iOS client with push delivery are the next two phases.
+
+Status: pre-release — no published install path yet.
+
+Licensed under [PolyForm Noncommercial 1.0.0](LICENSE).
