@@ -1,6 +1,6 @@
 # ![cc-runtime](docs/assets/readme-banner.webp)
 
-**Stop babysitting the terminal. Your agent's questions ping your phone.** cc-runtime routes AskUserQuestion and PushNotification through a daemon; you tap an answer from web or phone and the run keeps moving.
+**Stop babysitting the terminal. Your agent's questions wait for you.** cc-runtime routes AskUserQuestion and PushNotification through a daemon; you answer from any terminal, even hours later, and the run keeps moving.
 
 [![CI](https://github.com/yasyf/cc-runtime/actions/workflows/ci.yml/badge.svg)](https://github.com/yasyf/cc-runtime/actions/workflows/ci.yml)
 [![PolyForm Noncommercial license](https://img.shields.io/badge/license-PolyForm--Noncommercial--1.0.0-blue)](LICENSE)
