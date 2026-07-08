@@ -1,1 +1,1 @@
-{"v":1,"lamport":3,"ops":[{"kind":"set_status","status":"done"},{"kind":"link_commit","sha":"ff954db4975905b42a31278169dcd9078c30178a"}]}
+{"v":1,"lamport":4,"ops":[{"kind":"add_comment","body":"Landed as 3 commits on cc-transcript (036a776b, 4ba8dd18, 4260d301): types.rs/parse.rs typed core, event.rs materializer-only, mining+filter on typed entries. cargo 34/34, pytest 1077 (parity zero-diff incl. 3 real-transcript byte-identical spot checks), 39% faster than baseline, sonic_rs grep-audited to parse layer."}]}
