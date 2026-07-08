@@ -1,1 +1,1 @@
-{"v":1,"lamport":4,"ops":[{"kind":"set_status","status":"done"},{"kind":"link_commit","sha":"ff954db4975905b42a31278169dcd9078c30178a"}]}
+{"v":1,"lamport":5,"ops":[{"kind":"add_comment","body":"Verified: bootstrap.py verify passed; five targets build with correct embedded-plist bundle layout; CI run 28907800495 green (macos-26). Deferred from bootstrap: brand images (gen-image job died before landing — docs/assets/ absent), set-release-secrets.sh yasyf/cc-vigil (needs 1Password Touch ID), reposync repo add, GitHub social-preview upload."}]}
