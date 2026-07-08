@@ -1,5 +1,5 @@
 #!/bin/sh
-# cc-guides 0.1.2 src=install-binary.src.sh | GENERATED — do not edit: change install-binary.src.sh and run 'cc-guides render'. Everything below is in force.
+# cc-guides 0.1.7 src=install-binary.src.sh | GENERATED — do not edit: change install-binary.src.sh and run 'cc-guides render'. Everything below is in force.
 # Provision the cc-runtime binary for the cc-runtime plugin.
 #
 # bin/cc-runtime is only ever a symlink — to a brew-installed binary, the
