@@ -1,1 +1,1 @@
-{"v":1,"lamport":4,"ops":[{"kind":"set_status","status":"done"},{"kind":"link_commit","sha":"dec4bdbc2aed3aa0ab22d88688d841e09c5c984e"}]}
+{"v":1,"lamport":5,"ops":[{"kind":"add_comment","body":"Criterion bd66fae evidence (v0.2.0, 2026-07-09): spctl -a -vv accepted (source=Notarized Developer ID, team SXKCTF23Q2); stapler validate OK on the downloaded release zip; brew upgrade yasyf/tap/cc-vigil 0.1.0-\u003e0.2.0 succeeded on this machine."}]}
