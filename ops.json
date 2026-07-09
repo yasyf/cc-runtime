@@ -1,1 +1,1 @@
-{"v":1,"lamport":3,"ops":[{"kind":"add_comment","body":"Moved to the cc-vigil repo's own cc-notes store: task cd9ec31 + doc 4c052ee there (this store was the session cwd, not the repo the runbook belongs to). Track runs there; the new checklist adds three drills (power-source transition in clamshell, logout dead-man, cowork-host argv) and fixes the hook count to 5 (PreToolUse added)."}]}
+{"v":1,"lamport":4,"ops":[{"kind":"set_status","status":"cancelled"}]}
