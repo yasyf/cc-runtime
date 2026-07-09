@@ -1,1 +1,1 @@
-{"v":1,"lamport":2,"ops":[{"kind":"add_comment","body":"v0.2.0 re-exercised the full pipeline end-to-end on 2026-07-09: tag -\u003e notarize/staple -\u003e cask publish (tap 3e80e89, sha256 verified against the release sidecar). Closing — the signing/release lane is proven."}]}
+{"v":1,"lamport":3,"ops":[{"kind":"set_criterion_status","id":"bd66faeb21cb3418589548e7980e43bc","status":"met"}]}
