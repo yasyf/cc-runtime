@@ -22,6 +22,7 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+          check-latest: true
 
       - run: go build ./...
       - run: go vet ./...
