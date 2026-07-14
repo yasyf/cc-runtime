@@ -26,8 +26,10 @@ func pairCmd(d cmd.Deps) *cobra.Command {
 	c := &cobra.Command{
 		Use:   "pair",
 		Short: "Expose the daemon to the LAN (and tailnet) and print a QR code to pair a client",
-		Long: "Pair rebinds the daemon to the LAN (0.0.0.0), mints a bearer token, and prints a QR " +
-			"code plus copyable JSON a remote cc-runtime client uses to connect.\n\n" +
+		Long: "Pair exposes the daemon over HTTPS only — the plain-HTTP plane stays on loopback. It " +
+			"mints a bearer token plus a self-signed certificate served on every LAN interface, and " +
+			"prints a QR code plus copyable JSON a remote cc-runtime client uses to connect; the " +
+			"payload carries the certificate's SHA-256 fingerprint for the client to pin.\n\n" +
 			"When tailscale is running with MagicDNS, the daemon also serves HTTPS on the tailscale " +
 			"interface with a tailscale-minted certificate, and the payload carries that URL too.",
 		Args: cobra.NoArgs,
@@ -45,9 +47,10 @@ func pairCmd(d cmd.Deps) *cobra.Command {
 
 func accessStore() access.Store { return access.Store{Dir: appPaths().StateDir()} }
 
-// runPair rebinds the daemon to the LAN, ensures a bearer token, restarts the
-// daemon if needed, then prints the reachable URLs, a QR code, and the pairing
-// payload as copyable text.
+// runPair turns remote access on, ensures a bearer token and the LAN cert,
+// restarts the daemon if needed, then prints the reachable URLs, a QR code,
+// and the pairing payload as copyable text. Every advertised URL is HTTPS —
+// the LAN legs serve the self-signed cert whose fingerprint rides the payload.
 func runPair(ctx context.Context, d cmd.Deps, out io.Writer, resetToken bool) error {
 	st := accessStore()
 	if err := setBind(st, access.BindLAN); err != nil {
@@ -68,9 +71,19 @@ func runPair(ctx context.Context, d cmd.Deps, out io.Writer, resetToken bool) er
 	}
 	tokenChanged := resetToken || prev == ""
 
-	ts, tsOK := access.DetectTailscale(ctx)
-	info, err := ensureDaemon(ctx, d, access.BindLAN, tokenChanged, tsOK)
+	lanCert, err := st.EnsureLANCert()
 	if err != nil {
+		return err
+	}
+
+	ts, tsOK := access.DetectTailscale(ctx)
+	wantExtras := 1
+	if tsOK {
+		wantExtras = 2
+	}
+	// ensureDaemon fails unless the handshake shows every wanted TLS leg live,
+	// so each advertised URL below has a listener serving it.
+	if _, err := ensureDaemon(ctx, d, tokenChanged, wantExtras); err != nil {
 		return err
 	}
 
@@ -84,11 +97,9 @@ func runPair(ctx context.Context, d cmd.Deps, out io.Writer, resetToken bool) er
 
 	urls := make([]string, 0, len(ips)+1)
 	for _, ip := range ips {
-		urls = append(urls, fmt.Sprintf("http://%s:%d", ip, info.Port))
+		urls = append(urls, fmt.Sprintf("https://%s:%d", ip, access.LANTLSPort))
 	}
-	// Advertise the tailnet leg only when the daemon's handshake shows a live
-	// extra listener — never a URL nothing serves.
-	if tsOK && len(info.ExtraAddrs) > 0 {
+	if tsOK {
 		urls = append(urls, fmt.Sprintf("https://%s:%d", ts.FQDN, access.TLSPort))
 	}
 
@@ -96,7 +107,7 @@ func runPair(ctx context.Context, d cmd.Deps, out io.Writer, resetToken bool) er
 	if err != nil {
 		return err
 	}
-	_, payload, err := access.ComposePairPayload(host, urls, token)
+	_, payload, err := access.ComposePairPayload(host, urls, token, access.CertFingerprint(lanCert))
 	if err != nil {
 		return err
 	}
@@ -121,16 +132,16 @@ func runPair(ctx context.Context, d cmd.Deps, out io.Writer, resetToken bool) er
 	return nil
 }
 
-// runPairOff rebinds the daemon to loopback only and restarts it, taking the
-// plane off the LAN and stopping the Bonjour advertisement.
+// runPairOff drops the TLS legs and restarts the daemon, taking the plane off
+// the LAN and stopping the Bonjour advertisement.
 func runPairOff(ctx context.Context, d cmd.Deps, out io.Writer) error {
 	if err := setBind(accessStore(), access.BindLoopback); err != nil {
 		return err
 	}
-	if _, err := ensureDaemon(ctx, d, access.BindLoopback, false, false); err != nil {
+	if _, err := ensureDaemon(ctx, d, false, 0); err != nil {
 		return err
 	}
-	fmt.Fprintln(out, "remote access disabled; the daemon now binds 127.0.0.1 only")
+	fmt.Fprintln(out, "remote access disabled; the daemon now serves loopback only")
 	return nil
 }
 
@@ -148,17 +159,17 @@ func setBind(st access.Store, bind string) error {
 	return st.WriteConfig(cfg)
 }
 
-// ensureDaemon brings a current-version daemon bound to desiredBind online and
-// returns its published handshake. EnsureCurrent cold-starts an absent daemon
-// and upgrades a stale one; a live current daemon is then restarted when its
-// bind, token, or extra-listener set (the tailnet TLS leg pair advertises) no
-// longer matches what pairing hands out.
-func ensureDaemon(ctx context.Context, d cmd.Deps, desiredBind string, tokenChanged, wantTLS bool) (daemon.HTTPInfo, error) {
+// ensureDaemon brings a current-version daemon serving wantExtras TLS legs
+// online and returns its published handshake. EnsureCurrent cold-starts an
+// absent daemon and upgrades a stale one; a live current daemon is then
+// restarted when its token, bind, or extra-listener set no longer matches
+// what pairing hands out.
+func ensureDaemon(ctx context.Context, d cmd.Deps, tokenChanged bool, wantExtras int) (daemon.HTTPInfo, error) {
 	if err := d.EnsureCurrent(ctx); err != nil {
 		return daemon.HTTPInfo{}, err
 	}
 	info := readHTTPInfo(d.Paths)
-	if needsRestart(info, desiredBind, tokenChanged, wantTLS) {
+	if needsRestart(info, tokenChanged, wantExtras) {
 		if err := restartDaemon(ctx, d, d.NewClient()); err != nil {
 			return daemon.HTTPInfo{}, err
 		}
@@ -167,14 +178,18 @@ func ensureDaemon(ctx context.Context, d cmd.Deps, desiredBind string, tokenChan
 	if info.Port == 0 {
 		return daemon.HTTPInfo{}, errors.New("daemon did not publish its HTTP port")
 	}
+	if len(info.ExtraAddrs) != wantExtras {
+		return daemon.HTTPInfo{}, fmt.Errorf("daemon serves %d extra listeners, want %d", len(info.ExtraAddrs), wantExtras)
+	}
 	return info, nil
 }
 
 // needsRestart reports whether the running daemon no longer matches what
-// pairing will advertise: the token changed, the effective bind differs, or
-// the TLS leg's presence disagrees with tailscale availability.
-func needsRestart(info daemon.HTTPInfo, desiredBind string, tokenChanged, wantTLS bool) bool {
-	return tokenChanged || effectiveBind(info.Bind) != desiredBind || wantTLS != (len(info.ExtraAddrs) > 0)
+// pairing will advertise: the token changed, the plain-HTTP plane strayed off
+// loopback (a legacy cleartext LAN bind), or the TLS leg count disagrees with
+// the target.
+func needsRestart(info daemon.HTTPInfo, tokenChanged bool, wantExtras int) bool {
+	return tokenChanged || effectiveBind(info.Bind) != access.BindLoopback || len(info.ExtraAddrs) != wantExtras
 }
 
 // restartDaemon steps the running daemon down, waits for it to release the

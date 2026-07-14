@@ -17,10 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   serve outside the auth guard so a remote browser can bootstrap; `/events`
   and `/api` stay behind it. A committed placeholder keeps `go build` green
   until the real web build lands in `internal/web/dist`.
-- `cc-runtime pair` exposes the daemon to the LAN behind a minted bearer token,
-  prints a QR code plus copyable pair payload, and advertises `_cc-runtime._tcp`
-  over Bonjour. `--off` returns to loopback only; `--reset-token` rotates the
-  secret.
+- `cc-runtime pair` exposes the daemon to the LAN over HTTPS behind a minted
+  bearer token, prints a QR code plus copyable pair payload, and advertises
+  `_cc-runtime._tcp` over Bonjour. `--off` returns to loopback only;
+  `--reset-token` rotates the secret.
 - A paired daemon on a tailscale node with MagicDNS also serves HTTPS on the
   tailscale interface (port 25443) with `tailscale cert`-minted certificates,
   re-provisioned within 30 days of expiry.
@@ -41,6 +41,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   events, so a leaked bearer cannot buy push delivery forever.
 - `pair` advertises private-range (RFC 1918) LAN addresses only; a globally
   routable interface address never enters the QR payload.
+- The bearer token never crosses a network in cleartext. The daemon's plain
+  HTTP plane stays loopback-only; the LAN leg serves HTTPS on port 25444 with
+  a persisted self-signed certificate whose SHA-256 fingerprint rides the pair
+  payload (`fp`) for clients to pin, alongside the tailscale-cert tailnet leg.
 
 ### Fixed
 - Two concurrent answers to the same question can no longer split the event

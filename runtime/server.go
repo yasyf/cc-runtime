@@ -46,20 +46,27 @@ func buildServer(ctx context.Context) (*daemon.Server, error) {
 		PresenceEventType: conn.Type(),
 		OnPresenceChange:  conn.OnPresenceChange,
 		BootReconcile:     conn.BootReconcile,
-		BindAddr:          acfg.Bind,
-		HTTPToken:         token,
-		OnHTTPStart:       access.BonjourHook(acfg.Bind),
+		// The plain-HTTP plane never leaves loopback (the zero BindAddr);
+		// remote access rides the TLS extra listeners below, so the bearer
+		// token never crosses a network in cleartext.
+		HTTPToken:   token,
+		OnHTTPStart: access.BonjourHook(acfg.Bind),
 		// The SPA shell serves outside the auth guard: a remote browser must
 		// fetch assets and sw.js before any script can attach the token. Data
 		// routes (/events, /api) stay on the auth-wrapped mux.
 		PublicHandler: sse.StaticHandler(web.Dist()),
 	}
 	if !access.IsLoopbackBind(acfg.Bind) {
+		lanCert, err := st.EnsureLANCert()
+		if err != nil {
+			return nil, err
+		}
+		cfg.ExtraHTTPListeners = []func(context.Context) (net.Listener, error){
+			access.LANTLSListenerFactory(lanCert),
+		}
 		if ts, ok := access.DetectTailscale(ctx); ok {
 			certs := access.NewCertProvider(st.CertDir(), ts.FQDN)
-			cfg.ExtraHTTPListeners = []func(context.Context) (net.Listener, error){
-				access.TLSListenerFactory(ts, certs),
-			}
+			cfg.ExtraHTTPListeners = append(cfg.ExtraHTTPListeners, access.TLSListenerFactory(ts, certs))
 		}
 	}
 	s, err := daemon.New(cfg)

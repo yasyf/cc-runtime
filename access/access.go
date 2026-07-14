@@ -1,9 +1,10 @@
 // Package access is cc-runtime's local-first remote-access plane: the
 // persisted bind + bearer-token state pairing flips, the LAN-IP picker and
 // pairing payload the pair command prints, Bonjour advertising for LAN
-// discovery, and the tailscale-cert TLS listener the daemon serves tailnet
-// peers on. Nothing here talks to a relay — every path terminates at the
-// local daemon.
+// discovery, and the TLS listeners the daemon serves remote peers on — a
+// pinned self-signed cert for the LAN, a tailscale-minted cert for the
+// tailnet; remote traffic never rides cleartext HTTP. Nothing here talks to
+// a relay — every path terminates at the local daemon.
 package access
 
 import (
@@ -18,8 +19,9 @@ import (
 	"strings"
 )
 
-// Bind addresses the pair command flips between: LAN pairing binds every
-// interface; off returns the daemon to loopback only.
+// Bind addresses the pair command flips between: BindLAN turns remote access
+// on (the daemon serves the LAN/tailnet TLS listeners while the plain-HTTP
+// plane stays on loopback); off returns to loopback only.
 const (
 	BindLAN      = "0.0.0.0"
 	BindLoopback = "127.0.0.1"
@@ -34,8 +36,9 @@ type Store struct {
 // Config is the persisted access-plane configuration. The zero value is the
 // loopback-only default, so an absent file yields it.
 type Config struct {
-	// Bind is the HTTP plane's bind address. Empty means 127.0.0.1 (loopback
-	// only); "0.0.0.0" exposes the plane to the LAN.
+	// Bind is the persisted remote-access switch. Empty means loopback only;
+	// "0.0.0.0" has the daemon serve the LAN/tailnet TLS listeners — the
+	// plain-HTTP plane itself always binds loopback.
 	Bind string `json:"bind,omitempty"`
 }
 

@@ -9,27 +9,29 @@ import (
 )
 
 func TestNeedsRestart(t *testing.T) {
-	lan := daemon.HTTPInfo{Port: 4100, Bind: access.BindLAN}
-	lanTLS := daemon.HTTPInfo{Port: 4100, Bind: access.BindLAN, ExtraAddrs: []string{"100.64.0.9:25443"}}
+	loopback := daemon.HTTPInfo{Port: 4100}
+	remote := daemon.HTTPInfo{Port: 4100, Bind: access.BindLoopback, ExtraAddrs: []string{"0.0.0.0:25444"}}
+	remoteTS := daemon.HTTPInfo{Port: 4100, Bind: access.BindLoopback, ExtraAddrs: []string{"0.0.0.0:25444", "100.64.0.9:25443"}}
 	tests := []struct {
 		name         string
 		info         daemon.HTTPInfo
-		desiredBind  string
 		tokenChanged bool
-		wantTLS      bool
+		wantExtras   int
 		want         bool
 	}{
-		{"matching lan daemon reused", lan, access.BindLAN, false, false, false},
-		{"matching lan+tls daemon reused", lanTLS, access.BindLAN, false, true, false},
-		{"token change restarts", lan, access.BindLAN, true, false, true},
-		{"bind mismatch restarts", daemon.HTTPInfo{Port: 4100, Bind: access.BindLoopback}, access.BindLAN, false, false, true},
-		{"empty bind is loopback", daemon.HTTPInfo{Port: 4100}, access.BindLoopback, false, false, false},
-		{"tailscale now available but no tls leg restarts", lan, access.BindLAN, false, true, true},
-		{"tailscale gone but tls leg still up restarts", lanTLS, access.BindLAN, false, false, true},
+		{"matching loopback daemon reused", loopback, false, 0, false},
+		{"matching lan daemon reused", remote, false, 1, false},
+		{"matching lan+tailnet daemon reused", remoteTS, false, 2, false},
+		{"token change restarts", remote, true, 1, true},
+		{"legacy cleartext lan bind restarts", daemon.HTTPInfo{Port: 4100, Bind: access.BindLAN, ExtraAddrs: []string{"0.0.0.0:25444"}}, false, 1, true},
+		{"pairing a loopback daemon restarts", loopback, false, 1, true},
+		{"tailscale now available but no tailnet leg restarts", remote, false, 2, true},
+		{"tailscale gone but tailnet leg still up restarts", remoteTS, false, 1, true},
+		{"pair off drops the tls legs", remote, false, 0, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := needsRestart(tt.info, tt.desiredBind, tt.tokenChanged, tt.wantTLS); got != tt.want {
+			if got := needsRestart(tt.info, tt.tokenChanged, tt.wantExtras); got != tt.want {
 				t.Errorf("needsRestart = %v, want %v", got, tt.want)
 			}
 		})

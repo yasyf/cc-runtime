@@ -13,27 +13,28 @@ import (
 // paired cc-runtime daemon without a typed-in address.
 const BonjourService = "_cc-runtime._tcp"
 
-// BonjourHook returns the OnHTTPStart hook that advertises the HTTP plane over
-// mDNS. A loopback bind is unreachable off-host, so it returns nil (no hook).
-// The TXT records carry only the protocol version and host name — never the
-// token.
+// BonjourHook returns the OnHTTPStart hook that advertises the LAN HTTPS
+// listener (LANTLSPort) over mDNS; the loopback HTTP port the daemon hands the
+// hook is unreachable off-host, so it is ignored. A loopback bind has no LAN
+// leg and returns nil (no hook). The TXT records carry only the protocol
+// version and host name — never the token.
 func BonjourHook(bind string) func(ctx context.Context, port int) {
 	if IsLoopbackBind(bind) {
 		return nil
 	}
-	return func(ctx context.Context, port int) {
+	return func(ctx context.Context, _ int) {
 		host, err := os.Hostname()
 		if err != nil {
 			slog.Error("bonjour: resolve hostname", "err", err)
 			return
 		}
-		server, err := zeroconf.Register(host, BonjourService, "local.", port,
+		server, err := zeroconf.Register(host, BonjourService, "local.", LANTLSPort,
 			[]string{"v=1", "name=" + host}, nil)
 		if err != nil {
 			slog.Error("bonjour: register service", "service", BonjourService, "err", err)
 			return
 		}
-		slog.Info("bonjour: advertising", "service", BonjourService, "instance", host, "port", port)
+		slog.Info("bonjour: advertising", "service", BonjourService, "instance", host, "port", LANTLSPort)
 		<-ctx.Done()
 		server.Shutdown()
 	}
