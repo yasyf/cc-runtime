@@ -229,6 +229,60 @@ func TestSubscribeRejectsUndeliverableSubscriptions(t *testing.T) {
 	}
 }
 
+func TestSubscribeRejectsOversizedRegistrations(t *testing.T) {
+	valid := testSubscription(t, "https://push.example/reg/ok")
+	longEndpoint := valid
+	longEndpoint.Endpoint = "https://push.example/" + strings.Repeat("x", maxEndpointBytes)
+	longKey := valid
+	longKey.Keys.P256dh = strings.Repeat("A", maxKeyBytes+1)
+
+	marshal := func(s webpush.Subscription) string {
+		b, _ := json.Marshal(s)
+		return string(b)
+	}
+	for _, tc := range []struct {
+		id       string
+		body     string
+		wantCode int
+	}{
+		{id: "oversized body", body: `{"pad":"` + strings.Repeat("x", maxSubscriptionBytes) + `"}`, wantCode: http.StatusRequestEntityTooLarge},
+		{id: "oversized endpoint", body: marshal(longEndpoint), wantCode: http.StatusBadRequest},
+		{id: "oversized key", body: marshal(longKey), wantCode: http.StatusBadRequest},
+	} {
+		t.Run(tc.id, func(t *testing.T) {
+			f := newPushFixture(t)
+			if rec := f.post(tc.body); rec.Code != tc.wantCode {
+				t.Fatalf("subscribe = %d, want %d", rec.Code, tc.wantCode)
+			}
+			if got := f.endpoints(); len(got) != 0 {
+				t.Fatalf("projected endpoints = %v, want none", got)
+			}
+		})
+	}
+}
+
+func TestSubscribeCapsStoredSet(t *testing.T) {
+	f := newPushFixture(t)
+	for i := range maxSubscriptions {
+		f.subscribe(testSubscription(t, fmt.Sprintf("https://push.example/reg/%03d", i)))
+	}
+
+	over := testSubscription(t, "https://push.example/reg/overflow")
+	raw, _ := json.Marshal(over)
+	if rec := f.post(string(raw)); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("subscribe over cap = %d %s, want 429", rec.Code, rec.Body)
+	}
+	if got := f.endpoints(); len(got) != maxSubscriptions {
+		t.Fatalf("stored subscriptions = %d, want %d", len(got), maxSubscriptions)
+	}
+
+	// Re-registering a stored endpoint still passes at the cap.
+	f.subscribe(testSubscription(t, "https://push.example/reg/000"))
+	if got := f.endpoints(); len(got) != maxSubscriptions {
+		t.Fatalf("stored subscriptions after re-register = %d, want %d", len(got), maxSubscriptions)
+	}
+}
+
 func TestVAPIDKeyEndpointExposesOnlyThePublicKey(t *testing.T) {
 	f := newPushFixture(t)
 	rec := httptest.NewRecorder()

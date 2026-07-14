@@ -41,6 +41,20 @@ const pushTTL = 3600
 // operator of this application server.
 const pushSubscriber = "https://github.com/yasyf/cc-runtime"
 
+// Registration bounds: the body cap rejects oversized frames before decoding,
+// the field caps bound what a row can store, and the set cap bounds the
+// goroutines + outbound sockets every fan-out spawns per stored row.
+const (
+	maxSubscriptionBytes = 8 << 10
+	maxEndpointBytes     = 2048
+	maxKeyBytes          = 256
+	maxSubscriptions     = 32
+)
+
+// ErrSubscriptionLimit rejects a registration that would grow the stored
+// subscription set beyond maxSubscriptions.
+var ErrSubscriptionLimit = fmt.Errorf("subscription limit (%d) reached", maxSubscriptions)
+
 // pushSchema projects the current subscription set out of the push event log,
 // keyed by endpoint (the dedupe key); the log stays the durable record. The
 // well-known push subject the log rows reference is inserted by PushMigrate.
@@ -106,8 +120,18 @@ func NewPushSender(keys VAPIDKeys, db *sql.DB, append daemon.AppendFunc) *PushSe
 
 // Subscribe durably registers a push subscription: append the subscribe event
 // (deduped by endpoint), then project the row — append-first, like every
-// interaction write.
+// interaction write. A registration that would grow the stored set beyond
+// maxSubscriptions is refused (ErrSubscriptionLimit); re-registering a stored
+// endpoint always passes.
 func (p *PushSender) Subscribe(ctx context.Context, sub webpush.Subscription) error {
+	var others int
+	if err := p.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM push_subscriptions WHERE endpoint<>?`, sub.Endpoint).Scan(&others); err != nil {
+		return fmt.Errorf("count push subscriptions: %w", err)
+	}
+	if others >= maxSubscriptions {
+		return ErrSubscriptionLimit
+	}
 	frame, err := json.Marshal(pushEventFrame{Type: EventPushSubscribe, Endpoint: sub.Endpoint, Keys: &sub.Keys})
 	if err != nil {
 		return err
@@ -230,8 +254,14 @@ func MountPush(mux *http.ServeMux, sender *PushSender) {
 		writeJSON(w, map[string]string{"key": sender.keys.Public})
 	})
 	mux.HandleFunc("POST /api/push/subscriptions", func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxSubscriptionBytes)
 		var sub webpush.Subscription
 		if err := json.NewDecoder(r.Body).Decode(&sub); err != nil {
+			var maxErr *http.MaxBytesError
+			if errors.As(err, &maxErr) {
+				http.Error(w, fmt.Sprintf("subscription exceeds %d bytes", maxSubscriptionBytes), http.StatusRequestEntityTooLarge)
+				return
+			}
 			http.Error(w, "bad subscription: "+err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -240,6 +270,10 @@ func MountPush(mux *http.ServeMux, sender *PushSender) {
 			return
 		}
 		if err := sender.Subscribe(r.Context(), sub); err != nil {
+			if errors.Is(err, ErrSubscriptionLimit) {
+				http.Error(w, err.Error(), http.StatusTooManyRequests)
+				return
+			}
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -248,15 +282,22 @@ func MountPush(mux *http.ServeMux, sender *PushSender) {
 }
 
 // validateSubscription rejects a frame the sender could never deliver to: the
-// endpoint must be an absolute https URL (the daemon POSTs to it) and both
-// client keys must be present (the payload is encrypted against them).
+// endpoint must be an absolute https URL (the daemon POSTs to it) within
+// maxEndpointBytes, and both client keys must be present (the payload is
+// encrypted against them) within maxKeyBytes.
 func validateSubscription(sub webpush.Subscription) error {
+	if len(sub.Endpoint) > maxEndpointBytes {
+		return fmt.Errorf("subscription endpoint exceeds %d bytes", maxEndpointBytes)
+	}
 	u, err := url.Parse(sub.Endpoint)
 	if err != nil || u.Scheme != "https" || u.Host == "" {
 		return errors.New("subscription endpoint must be an absolute https URL")
 	}
 	if sub.Keys.P256dh == "" || sub.Keys.Auth == "" {
 		return errors.New("subscription keys p256dh and auth are required")
+	}
+	if len(sub.Keys.P256dh) > maxKeyBytes || len(sub.Keys.Auth) > maxKeyBytes {
+		return fmt.Errorf("subscription keys exceed %d bytes", maxKeyBytes)
 	}
 	return nil
 }
