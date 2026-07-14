@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The interaction ops now ride the daemon's auth-guarded HTTP plane:
+  `GET /api/sessions` lists active subjects across scopes with open-question
+  counts, `GET /api/subjects/{id}/pending` returns open questions with full
+  payloads, and `POST /api/subjects/{id}/answer` maps onto the socket answer
+  op with the same idempotent dedup and edit-gate release.
 - `cc-runtime pair` exposes the daemon to the LAN behind a minted bearer token,
   prints a QR code plus copyable pair payload, and advertises `_cc-runtime._tcp`
   over Bonjour. `--off` returns to loopback only; `--reset-token` rotates the

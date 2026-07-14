@@ -1,6 +1,8 @@
 package interaction
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -174,62 +176,77 @@ func (h handlers) handleNotify(hc daemon.HandlerCtx) daemon.Reply {
 	return daemon.Reply{OK: true, SubjectID: sub.ID, Body: json.RawMessage(`{"ok":true}`)}
 }
 
-// handleAnswer logs the answer before projecting it (append-first). The gate is
-// subjects.status, never the answer event's own seq, so nothing keys off that
-// seq and append-first is safe. Ordering: pre-validate → Append → project, so
-// the gate releases only on an answer that is durably in the log, and a retry of
-// a partially-applied answer re-Appends (a deduped no-op) and re-runs the
-// projection to completion.
+// unknownQuestionError marks an answer targeting no projected question, so the
+// REST route can 404 it while the socket op reports the same message.
+type unknownQuestionError struct {
+	subjectID  string
+	questionID int64
+}
+
+func (e unknownQuestionError) Error() string {
+	return fmt.Sprintf("answer targets unknown question (subject=%s id=%d)", e.subjectID, e.questionID)
+}
+
 func handleAnswer(hc daemon.HandlerCtx) daemon.Reply {
 	var a AnswerPayload
 	if err := json.Unmarshal(hc.Env.Body, &a); err != nil {
 		return daemon.Reply{OK: false, Error: "bad answer body: " + err.Error()}
 	}
-
-	known, answered, err := questionState(hc.Ctx, hc.DB, a.SubjectID, a.QuestionID)
+	idled, err := applyAnswer(hc.Ctx, hc.DB, hc.Append, a)
 	if err != nil {
-		return daemon.Reply{OK: false, Error: err.Error()}
-	}
-	if !known {
-		return daemon.Reply{OK: false, Error: fmt.Sprintf("answer targets unknown question (subject=%s id=%d)", a.SubjectID, a.QuestionID)}
-	}
-	if answered {
-		// Idempotent: the question is already answered. Do not append, do not
-		// overwrite. Report idled from the current open-question count.
-		open, err := openCount(hc.Ctx, hc.DB, a.SubjectID)
-		if err != nil {
-			return daemon.Reply{OK: false, Error: err.Error()}
-		}
-		body, _ := json.Marshal(answerReply{Idled: open == 0})
-		return daemon.Reply{OK: true, SubjectID: a.SubjectID, Body: body}
-	}
-
-	payload, _ := json.Marshal(a)
-	if _, err := hc.Append(hc.Ctx, &event.Event{
-		SubjectID: a.SubjectID, Origin: event.OriginHuman, Type: EventAnswer,
-		Payload:  wireEvent(EventAnswer, a),
-		DedupKey: "answer:" + a.SubjectID + ":" + strconv.FormatInt(a.QuestionID, 10),
-	}); err != nil {
-		return daemon.Reply{OK: false, Error: err.Error()}
-	}
-
-	// The answer is durable. Project it on a daemon-owned cleanup context (derived
-	// from context.Background, not hc.Ctx) so the projection completes even as
-	// hc.Ctx is being cancelled by daemon shutdown. If this fails the status stays
-	// awaiting (fail-closed) and pollAnswer still reports not-answered, so the agent
-	// keeps waiting; a retry re-Appends (deduped) and re-projects.
-	ctx, cancel := cleanupCtx()
-	defer cancel()
-	var idled bool
-	if err := withBusyRetry(ctx, func() error {
-		var err error
-		idled, err = recordAnswer(ctx, hc.DB, a.SubjectID, a.QuestionID, string(payload))
-		return err
-	}); err != nil {
 		return daemon.Reply{OK: false, Error: err.Error()}
 	}
 	body, _ := json.Marshal(answerReply{Idled: idled})
 	return daemon.Reply{OK: true, SubjectID: a.SubjectID, Body: body}
+}
+
+// applyAnswer is the shared answer core behind the socket op and the REST
+// route; it logs the answer before projecting it (append-first — safe because
+// the gate is subjects.status, never the answer event's seq). Ordering:
+// pre-validate → Append → project, so the gate releases only on an answer
+// durably in the log, and a retry of a partially-applied answer re-Appends (a
+// deduped no-op) and re-runs the projection to completion. The returned bool
+// reports whether the subject idled (the gate released).
+func applyAnswer(ctx context.Context, db *sql.DB, append daemon.AppendFunc, a AnswerPayload) (bool, error) {
+	known, answered, err := questionState(ctx, db, a.SubjectID, a.QuestionID)
+	if err != nil {
+		return false, err
+	}
+	if !known {
+		return false, unknownQuestionError{subjectID: a.SubjectID, questionID: a.QuestionID}
+	}
+	if answered {
+		// Idempotent: already answered — no append, no overwrite; report idled
+		// from the current open-question count.
+		open, err := openCount(ctx, db, a.SubjectID)
+		if err != nil {
+			return false, err
+		}
+		return open == 0, nil
+	}
+
+	payload, _ := json.Marshal(a)
+	if _, err := append(ctx, &event.Event{
+		SubjectID: a.SubjectID, Origin: event.OriginHuman, Type: EventAnswer,
+		Payload:  wireEvent(EventAnswer, a),
+		DedupKey: "answer:" + a.SubjectID + ":" + strconv.FormatInt(a.QuestionID, 10),
+	}); err != nil {
+		return false, err
+	}
+
+	// Durable answer: project on a daemon-owned cleanup context so a cancelled
+	// ctx cannot abandon it; on failure the status stays awaiting (fail-closed).
+	cctx, cancel := cleanupCtx()
+	defer cancel()
+	var idled bool
+	if err := withBusyRetry(cctx, func() error {
+		var err error
+		idled, err = recordAnswer(cctx, db, a.SubjectID, a.QuestionID, string(payload))
+		return err
+	}); err != nil {
+		return false, err
+	}
+	return idled, nil
 }
 
 func handleAnswerPoll(hc daemon.HandlerCtx) daemon.Reply {

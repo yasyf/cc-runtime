@@ -76,12 +76,12 @@ type harness struct {
 	fanout *recordingFanout
 }
 
-func newHarness(t *testing.T) *harness {
+func newHarness(t *testing.T, tweaks ...func(*daemon.Config)) *harness {
 	t.Helper()
 	t.Setenv("HOME", shortTempHome(t))
 	p := paths.Paths{App: ".ccr"}
 
-	s, err := daemon.New(daemon.Config{
+	cfg := daemon.Config{
 		AppName:         "cc-runtime-test",
 		Paths:           p,
 		Version:         "v0.0.0-test",
@@ -89,12 +89,17 @@ func newHarness(t *testing.T) *harness {
 		Gate:            Gate(),
 		GateErrorReason: GateErrorReason,
 		Migrate:         Migrate,
-	})
+	}
+	for _, tweak := range tweaks {
+		tweak(&cfg)
+	}
+	s, err := daemon.New(cfg)
 	if err != nil {
 		t.Fatalf("daemon.New: %v", err)
 	}
 	fanout := &recordingFanout{}
 	Register(s, fanout)
+	MountREST(s)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)

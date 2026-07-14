@@ -40,9 +40,11 @@ type PendingQuestion struct {
 	Payload    string `json:"payload"`
 }
 
-// ListedSubject is one scope-resolved subject for the TUI, with its open count.
+// ListedSubject is one active subject for the TUI and the REST sessions
+// listing, with its open count.
 type ListedSubject struct {
 	SubjectID string `json:"subject_id"`
+	Scope     string `json:"scope"`
 	Status    string `json:"status"`
 	Pending   int    `json:"pending"`
 }
@@ -241,14 +243,29 @@ func openQuestions(ctx context.Context, db *sql.DB, subjectID string) ([]Pending
 // listSubjects returns the scope's active subjects with their open-question
 // counts for the TUI.
 func listSubjects(ctx context.Context, db *sql.DB, scope string) ([]ListedSubject, error) {
-	rows, err := db.QueryContext(ctx, `
-SELECT s.id, s.status, COUNT(p.question_id)
+	return queryListedSubjects(ctx, db, `AND s.scope = ?`, scope)
+}
+
+// listSessions returns every active subject across scopes with its
+// open-question count, for the REST sessions listing — a web client holds no
+// scope, so it sees them all.
+func listSessions(ctx context.Context, db *sql.DB) ([]ListedSubject, error) {
+	return queryListedSubjects(ctx, db, ``)
+}
+
+// queryListedSubjects is the shared active-subject listing behind the socket
+// list op and the REST sessions route. scopeFilter is a constant SQL fragment
+// (empty or `AND s.scope = ?`), never caller input.
+func queryListedSubjects(ctx context.Context, db *sql.DB, scopeFilter string, scopeArgs ...any) ([]ListedSubject, error) {
+	args := append([]any{StatusIdle, StatusAwaiting}, scopeArgs...)
+	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
+SELECT s.id, s.scope, s.status, COUNT(p.question_id)
 FROM subjects s
 LEFT JOIN pending_questions p ON p.subject_id = s.id AND p.answered = 0
-WHERE s.scope = ? AND s.status IN (?, ?)
-GROUP BY s.id, s.status
-ORDER BY s.created_at DESC, s.rowid DESC`,
-		scope, StatusIdle, StatusAwaiting)
+WHERE s.status IN (?, ?) %s
+GROUP BY s.id, s.scope, s.status
+ORDER BY s.created_at DESC, s.rowid DESC`, scopeFilter),
+		args...)
 	if err != nil {
 		return nil, fmt.Errorf("list subjects: %w", err)
 	}
@@ -256,10 +273,24 @@ ORDER BY s.created_at DESC, s.rowid DESC`,
 	out := []ListedSubject{}
 	for rows.Next() {
 		var ls ListedSubject
-		if err := rows.Scan(&ls.SubjectID, &ls.Status, &ls.Pending); err != nil {
+		if err := rows.Scan(&ls.SubjectID, &ls.Scope, &ls.Status, &ls.Pending); err != nil {
 			return nil, fmt.Errorf("scan listed subject: %w", err)
 		}
 		out = append(out, ls)
 	}
 	return out, rows.Err()
+}
+
+// subjectExists reports whether a subject row exists, so the REST pending route
+// can 404 an unknown id instead of answering it with an empty set.
+func subjectExists(ctx context.Context, db *sql.DB, subjectID string) (bool, error) {
+	var one int
+	switch err := db.QueryRowContext(ctx,
+		`SELECT 1 FROM subjects WHERE id=?`, subjectID).Scan(&one); {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("subject exists: %w", err)
+	}
+	return true, nil
 }

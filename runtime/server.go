@@ -62,6 +62,7 @@ func buildServer(ctx context.Context) (*daemon.Server, error) {
 	}
 	sender := access.NewPushSender(vapid, s.DB(), s.Append)
 	access.MountPush(s.Mux(), sender)
+	interaction.MountREST(s)
 	interaction.Register(s, pushFanout{sender: sender})
 	return s, nil
 }
