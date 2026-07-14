@@ -14,9 +14,11 @@ const pushTimeout = 30 * time.Second
 
 // pushFanout bridges interaction's append fan-out to the access plane's Web
 // Push sender: each hook maps the domain payload onto the compact push frame
-// and delivers it off the handler's goroutine.
+// and delivers it off the handler's goroutine, tracked on the daemon
+// lifecycle via background (daemon.Server.Background).
 type pushFanout struct {
-	sender *access.PushSender
+	sender     *access.PushSender
+	background func(func(context.Context))
 }
 
 func (f pushFanout) Question(subjectID string, q interaction.QuestionPayload) {
@@ -38,14 +40,15 @@ func (f pushFanout) Notification(subjectID string, n interaction.NotificationPay
 	})
 }
 
-// deliver runs the fan-out on a daemon-owned context so a handler reply is
-// never held behind push-service round trips.
+// deliver runs the fan-out off the handler's goroutine on the daemon
+// lifecycle: the serve context cancels in-flight sends at shutdown, and the
+// daemon drains them before closing the store.
 func (f pushFanout) deliver(p access.PushPayload) {
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), pushTimeout)
+	f.background(func(ctx context.Context) {
+		ctx, cancel := context.WithTimeout(ctx, pushTimeout)
 		defer cancel()
 		if err := f.sender.Fanout(ctx, p); err != nil {
 			log.Printf("[%s] push fanout: %v", interaction.AppName, err)
 		}
-	}()
+	})
 }

@@ -49,6 +49,10 @@ func buildServer(ctx context.Context) (*daemon.Server, error) {
 		BindAddr:          acfg.Bind,
 		HTTPToken:         token,
 		OnHTTPStart:       access.BonjourHook(acfg.Bind),
+		// The SPA shell serves outside the auth guard: a remote browser must
+		// fetch assets and sw.js before any script can attach the token. Data
+		// routes (/events, /api) stay on the auth-wrapped mux.
+		PublicHandler: sse.StaticHandler(web.Dist()),
 	}
 	if !access.IsLoopbackBind(acfg.Bind) {
 		if ts, ok := access.DetectTailscale(ctx); ok {
@@ -68,10 +72,7 @@ func buildServer(ctx context.Context) (*daemon.Server, error) {
 	}
 	access.MountPush(s.Mux(), sender)
 	interaction.MountREST(s)
-	// Catch-all SPA mount; the pattern mux keeps /events and /api routes ahead
-	// of it, and the auth handler wraps them all.
-	s.Mux().Handle("/", sse.StaticHandler(web.Dist()))
-	interaction.Register(s, pushFanout{sender: sender})
+	interaction.Register(s, pushFanout{sender: sender, background: s.Background})
 	return s, nil
 }
 
