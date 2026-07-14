@@ -35,6 +35,8 @@ func BonjourHook(bind string) func(ctx context.Context, port int) {
 			return
 		}
 		slog.Info("bonjour: advertising", "service", BonjourService, "instance", host, "port", LANTLSPort)
+		// Serve awaits this hook, so a graceful restart flushes mDNS goodbye
+		// packets; a SIGKILLed daemon skips them and the record lingers.
 		<-ctx.Done()
 		server.Shutdown()
 	}
