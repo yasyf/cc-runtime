@@ -8,7 +8,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/shirou/gopsutil/v4 v4.26.5
 	github.com/spf13/cobra v1.10.2
-	github.com/yasyf/cc-interact v0.6.0
+	github.com/yasyf/cc-interact v0.7.0
 	modernc.org/sqlite v1.52.0
 )
 
@@ -51,3 +51,5 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
+
+replace github.com/yasyf/cc-interact => /Users/yasyf/Code/cc-interact
