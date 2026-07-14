@@ -3,7 +3,9 @@ package access
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -58,11 +60,18 @@ var ErrSubscriptionLimit = fmt.Errorf("subscription limit (%d) reached", maxSubs
 // pushSchema projects the current subscription set out of the push event log,
 // keyed by endpoint (the dedupe key); the log stays the durable record. The
 // well-known push subject the log rows reference is inserted by PushMigrate.
+// push_access records the grant surface (token hash + bind) the set was minted
+// under, so ReconcileGrants can revoke it when that surface is gone.
 const pushSchema = `
 CREATE TABLE IF NOT EXISTS push_subscriptions (
   endpoint     TEXT PRIMARY KEY,
   subscription TEXT NOT NULL,
   created_at   INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS push_access (
+  id         INTEGER PRIMARY KEY CHECK (id = 1),
+  token_hash TEXT NOT NULL,
+  bind       TEXT NOT NULL
 );
 `
 
@@ -202,6 +211,50 @@ func (p *PushSender) send(ctx context.Context, msg []byte, sub webpush.Subscript
 		return p.prune(ctx, sub.Endpoint)
 	case resp.StatusCode >= http.StatusMultipleChoices:
 		return fmt.Errorf("push %s: status %d", sub.Endpoint, resp.StatusCode)
+	}
+	return nil
+}
+
+// ReconcileGrants runs at boot: it revokes every stored subscription when the
+// access surface they were minted under is gone — a rotated bearer token, or
+// remote access turned off (a non-loopback bind flipping to loopback) — then
+// records the current surface. A subscription is a durable delivery grant;
+// revoking the surface must revoke the grants.
+func (p *PushSender) ReconcileGrants(ctx context.Context, token, bind string) error {
+	sum := sha256.Sum256([]byte(token))
+	hash := hex.EncodeToString(sum[:])
+	var storedHash, storedBind string
+	err := p.db.QueryRowContext(ctx,
+		`SELECT token_hash, bind FROM push_access WHERE id=1`).Scan(&storedHash, &storedBind)
+	known := err == nil
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("read push access surface: %w", err)
+	}
+	if known && (storedHash != hash || (!IsLoopbackBind(storedBind) && IsLoopbackBind(bind))) {
+		if err := p.purgeAll(ctx); err != nil {
+			return err
+		}
+	}
+	if _, err := p.db.ExecContext(ctx,
+		`INSERT INTO push_access(id, token_hash, bind) VALUES(1,?,?)
+		 ON CONFLICT(id) DO UPDATE SET token_hash=excluded.token_hash, bind=excluded.bind`,
+		hash, bind); err != nil {
+		return fmt.Errorf("record push access surface: %w", err)
+	}
+	return nil
+}
+
+// purgeAll retires every stored subscription through prune, so each revocation
+// leaves a durable unsubscribe event.
+func (p *PushSender) purgeAll(ctx context.Context) error {
+	subs, err := p.subscriptions(ctx)
+	if err != nil {
+		return err
+	}
+	for _, sub := range subs {
+		if err := p.prune(ctx, sub.Endpoint); err != nil {
+			return err
+		}
 	}
 	return nil
 }

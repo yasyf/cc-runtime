@@ -283,6 +283,65 @@ func TestSubscribeCapsStoredSet(t *testing.T) {
 	}
 }
 
+func TestReconcileGrantsRevokesOnSurfaceChange(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		id                    string
+		firstToken, nextToken string
+		firstBind, nextBind   string
+		wantPurged            bool
+	}{
+		{id: "token rotation purges", firstToken: "tok-a", nextToken: "tok-b", firstBind: "0.0.0.0", nextBind: "0.0.0.0", wantPurged: true},
+		{id: "remote access off purges", firstToken: "tok-a", nextToken: "tok-a", firstBind: "0.0.0.0", nextBind: "127.0.0.1", wantPurged: true},
+		{id: "same surface keeps grants", firstToken: "tok-a", nextToken: "tok-a", firstBind: "0.0.0.0", nextBind: "0.0.0.0", wantPurged: false},
+		{id: "loopback to lan keeps grants", firstToken: "tok-a", nextToken: "tok-a", firstBind: "127.0.0.1", nextBind: "0.0.0.0", wantPurged: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.id, func(t *testing.T) {
+			f := newPushFixture(t)
+			if err := f.sender.ReconcileGrants(ctx, tt.firstToken, tt.firstBind); err != nil {
+				t.Fatalf("ReconcileGrants (first boot): %v", err)
+			}
+			sub := testSubscription(t, "https://push.example/reg/1")
+			f.subscribe(sub)
+
+			if err := f.sender.ReconcileGrants(ctx, tt.nextToken, tt.nextBind); err != nil {
+				t.Fatalf("ReconcileGrants (next boot): %v", err)
+			}
+
+			got := f.endpoints()
+			if tt.wantPurged {
+				if len(got) != 0 {
+					t.Fatalf("stored subscriptions = %v, want purged", got)
+				}
+				events := f.events()
+				last := events[len(events)-1]
+				if last.Type != EventPushUnsubscribe || last.Endpoint != sub.Endpoint {
+					t.Fatalf("last event = %+v, want %s for %s", last, EventPushUnsubscribe, sub.Endpoint)
+				}
+				return
+			}
+			if len(got) != 1 || got[0] != sub.Endpoint {
+				t.Fatalf("stored subscriptions = %v, want [%s]", got, sub.Endpoint)
+			}
+		})
+	}
+}
+
+func TestReconcileGrantsFirstBootAdoptsExistingSet(t *testing.T) {
+	f := newPushFixture(t)
+	sub := testSubscription(t, "https://push.example/reg/legacy")
+	f.subscribe(sub)
+
+	// No recorded surface yet (pre-upgrade rows): adopt, never purge.
+	if err := f.sender.ReconcileGrants(context.Background(), "tok-a", "0.0.0.0"); err != nil {
+		t.Fatalf("ReconcileGrants: %v", err)
+	}
+	if got := f.endpoints(); len(got) != 1 || got[0] != sub.Endpoint {
+		t.Fatalf("stored subscriptions = %v, want [%s]", got, sub.Endpoint)
+	}
+}
+
 func TestVAPIDKeyEndpointExposesOnlyThePublicKey(t *testing.T) {
 	f := newPushFixture(t)
 	rec := httptest.NewRecorder()

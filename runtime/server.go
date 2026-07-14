@@ -63,6 +63,9 @@ func buildServer(ctx context.Context) (*daemon.Server, error) {
 		return nil, err
 	}
 	sender := access.NewPushSender(vapid, s.DB(), s.Append)
+	if err := sender.ReconcileGrants(ctx, token, acfg.Bind); err != nil {
+		return nil, err
+	}
 	access.MountPush(s.Mux(), sender)
 	interaction.MountREST(s)
 	// Catch-all SPA mount; the pattern mux keeps /events and /api routes ahead
