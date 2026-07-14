@@ -50,7 +50,6 @@ func newHarness(t *testing.T) *harness {
 		Paths:           p,
 		Version:         "v0.0.0-test",
 		ActiveStatuses:  ActiveStatuses,
-		WindowAlive:     func(int) bool { return true },
 		Gate:            Gate(),
 		GateErrorReason: GateErrorReason,
 		Migrate:         Migrate,

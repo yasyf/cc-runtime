@@ -8,7 +8,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/shirou/gopsutil/v4 v4.26.5
 	github.com/spf13/cobra v1.10.2
-	github.com/yasyf/cc-interact v0.1.4
+	github.com/yasyf/cc-interact v0.6.0
 	modernc.org/sqlite v1.52.0
 )
 

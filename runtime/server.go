@@ -19,7 +19,6 @@ func buildServer() (*daemon.Server, error) {
 		Paths:             interaction.AppPaths(),
 		Version:           version.Version,
 		ActiveStatuses:    interaction.ActiveStatuses,
-		WindowAlive:       live,
 		Gate:              interaction.Gate(),
 		GateErrorReason:   interaction.GateErrorReason,
 		Migrate:           interaction.Migrate,

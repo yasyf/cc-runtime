@@ -77,7 +77,7 @@ func newE2E(t *testing.T) *e2e {
 	// subject wiring, so the test can pull the exact subject.Subject the gate
 	// sees and evaluate interaction.Gate() against it directly.
 	resolver := subject.Resolver{
-		Store: store.NewSubjectStore(s.DB(), interaction.ActiveStatuses),
+		Store: store.NewSubjectStore(s.DB()),
 	}
 	return &e2e{t: t, client: client, resolver: resolver}
 }

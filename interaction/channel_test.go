@@ -25,14 +25,6 @@ type channelHarness struct {
 }
 
 func newChannelHarness(t *testing.T) *channelHarness {
-	return newChannelHarnessWithAlive(t, func(int) bool { return true })
-}
-
-// newChannelHarnessWithAlive builds the channel harness with a caller-supplied
-// WindowAlive so a test can make liveness discriminating (true only for the
-// designated claude pids), exercising the daemon's real ownership policy instead
-// of the always-alive stub that masks window-ownership bugs.
-func newChannelHarnessWithAlive(t *testing.T, alive func(int) bool) *channelHarness {
 	t.Helper()
 	t.Setenv("HOME", shortTempHome(t))
 	p := AppPaths()
@@ -42,7 +34,6 @@ func newChannelHarnessWithAlive(t *testing.T, alive func(int) bool) *channelHarn
 		Paths:           p,
 		Version:         "v0.0.0-test",
 		ActiveStatuses:  ActiveStatuses,
-		WindowAlive:     alive,
 		Gate:            Gate(),
 		GateErrorReason: GateErrorReason,
 		Migrate:         Migrate,
@@ -323,12 +314,11 @@ func TestAskToolSubjectKeyedToClaudePID(t *testing.T) {
 }
 
 // TestNoCrossWindowTheftWhileOwnerLives proves the window-ownership invariant:
-// while window A's claude process is alive, a second window B in the same scope
-// must NOT adopt A's awaiting subject. WindowAlive is discriminating (true only
-// for the two real claude pids), so the daemon's Policy.Held reads A's subject
-// as held and refuses adoption. Before the fix, ChannelTools stamped the channel
-// server's getpid — which WindowAlive reports dead — so Held was false and B
-// stole A's awaiting subject and its open question.
+// a second window B in the same scope must NOT adopt window A's awaiting subject.
+// Ownership is per-window (keyed to the claude pid), and the resolver never
+// adopts another window's subject, so B's start creates its own subject. Before
+// the fix, ChannelTools stamped the channel server's getpid, so A's subject bound
+// to the wrong window and B stole A's awaiting subject and its open question.
 func TestNoCrossWindowTheftWhileOwnerLives(t *testing.T) {
 	const (
 		pidA       = 700001
@@ -337,8 +327,7 @@ func TestNoCrossWindowTheftWhileOwnerLives(t *testing.T) {
 		sessionB   = "sess-B"
 		theftScope = "/scope/theft"
 	)
-	alive := map[int]bool{pidA: true, pidB: true}
-	h := newChannelHarnessWithAlive(t, func(pid int) bool { return alive[pid] })
+	h := newChannelHarness(t)
 
 	// Window A asks through the real handler; its subject goes awaiting, keyed to pidA.
 	askA := askToolFor(t, sessionA, pidA, theftScope)
@@ -376,17 +365,13 @@ func TestNoCrossWindowTheftWhileOwnerLives(t *testing.T) {
 }
 
 // TestFreshWindowDoesNotInheritDeadOwnersAwaitingSubject proves the cross-window
-// adoption invariant: an awaiting subject is never adopted, even once its owning
-// window dies. Window A asks (subject goes awaiting, keyed to pidA), then A's
-// window DIES (WindowAlive(pidA) returns false). A fresh window B — different
-// pid, different session, same scope — issues OpStart and must get its own NEW,
-// IDLE subject rather than inheriting A's awaiting one and its open-question
-// edit-block.
-//
-// With StatusAwaiting in ActiveStatuses this fails: A's dead window makes
-// Policy.Held false, A's awaiting subject is adoptable, and B adopts it (B's
-// OpStart returns subjectA, still awaiting). Dropping awaiting from the adoptable
-// set keeps A's awaiting subject out of FindAdoptableByScope, so B creates fresh.
+// adoption invariant: an awaiting subject is never adopted by another window.
+// Window A asks (subject goes awaiting, keyed to pidA). A fresh window B —
+// different pid, different session, same scope — issues OpStart and must get its
+// own NEW, IDLE subject rather than inheriting A's awaiting one and its
+// open-question edit-block. Ownership is per-window: the resolver binds B to its
+// own pid-latest subject (none yet), so B creates fresh and A's subject is left
+// untouched.
 func TestFreshWindowDoesNotInheritDeadOwnersAwaitingSubject(t *testing.T) {
 	const (
 		pidA      = 800001
@@ -395,9 +380,7 @@ func TestFreshWindowDoesNotInheritDeadOwnersAwaitingSubject(t *testing.T) {
 		sessionB  = "sess-B"
 		deadScope = "/scope/dead-owner"
 	)
-	// A's window starts alive (so its ask binds to pidA), B's window is alive.
-	alive := map[int]bool{pidA: true, pidB: true}
-	h := newChannelHarnessWithAlive(t, func(pid int) bool { return alive[pid] })
+	h := newChannelHarness(t)
 
 	// Window A asks through the real handler; its subject goes awaiting, keyed to pidA.
 	askA := askToolFor(t, sessionA, pidA, deadScope)
@@ -410,9 +393,6 @@ func TestFreshWindowDoesNotInheritDeadOwnersAwaitingSubject(t *testing.T) {
 	if got := subjectClaudePID(t, subjectA); got != pidA {
 		t.Fatalf("A's subject claude_pid = %d, want %d", got, pidA)
 	}
-
-	// A's window now DIES, unanswered: its claude process is gone.
-	alive[pidA] = false
 
 	// Window B (different claude pid, different session, same scope) starts.
 	rB := mustDo(t, h.client, daemon.Envelope{Op: OpStart, Session: sessionB, ClaudePID: pidB, Scope: deadScope})
