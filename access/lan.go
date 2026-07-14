@@ -13,28 +13,24 @@ type netIface struct {
 	Addrs    []net.Addr
 }
 
-// pickLANIPs returns the usable LAN IPv4 addresses across ifaces, private-range
-// (real LAN) addresses first, skipping down and loopback interfaces and any
-// non-IPv4, loopback, or link-local address.
+// pickLANIPs returns the usable LAN IPv4 addresses across ifaces: private-range
+// (RFC 1918) addresses only, skipping down and loopback interfaces. A globally
+// routable address is never a LAN leg — advertising one would carry the bearer
+// token over cleartext HTTP beyond the local network.
 func pickLANIPs(ifaces []netIface) []net.IP {
-	var private, other []net.IP
+	var private []net.IP
 	for _, ifc := range ifaces {
 		if !ifc.Up || ifc.Loopback {
 			continue
 		}
 		for _, a := range ifc.Addrs {
 			v4 := addrIP(a).To4()
-			if v4 == nil || v4.IsLoopback() || v4.IsLinkLocalUnicast() {
-				continue
-			}
-			if v4.IsPrivate() {
+			if v4 != nil && v4.IsPrivate() {
 				private = append(private, v4)
-			} else {
-				other = append(other, v4)
 			}
 		}
 	}
-	return append(private, other...)
+	return private
 }
 
 // addrIP extracts the IP from a network address, ignoring the mask.

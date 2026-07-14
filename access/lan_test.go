@@ -48,18 +48,23 @@ func TestPickLANIPs(t *testing.T) {
 			want:   nil,
 		},
 		{
-			name:   "private ranked before public",
+			name:   "public ipv4 excluded",
 			ifaces: []netIface{{Up: true, Addrs: []net.Addr{ipNet("8.8.8.8"), ipNet("10.0.0.2")}}},
-			want:   []string{"10.0.0.2", "8.8.8.8"},
+			want:   []string{"10.0.0.2"},
 		},
 		{
-			name: "across interfaces, private first",
+			name:   "cgnat tailscale range excluded",
+			ifaces: []netIface{{Up: true, Addrs: []net.Addr{ipNet("100.101.102.103")}}},
+			want:   nil,
+		},
+		{
+			name: "across interfaces, private only",
 			ifaces: []netIface{
 				{Up: true, Addrs: []net.Addr{ipNet("203.0.113.7")}},
 				{Up: false, Addrs: []net.Addr{ipNet("192.168.9.9")}},
 				{Up: true, Addrs: []net.Addr{ipNet("172.16.0.4")}},
 			},
-			want: []string{"172.16.0.4", "203.0.113.7"},
+			want: []string{"172.16.0.4"},
 		},
 	}
 	for _, tt := range tests {
