@@ -47,7 +47,7 @@ func newE2E(t *testing.T) *e2e {
 	t.Helper()
 	t.Setenv("HOME", shortTempHome(t))
 
-	s, err := buildServer()
+	s, err := buildServer(t.Context())
 	if err != nil {
 		t.Fatalf("buildServer: %v", err)
 	}

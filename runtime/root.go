@@ -33,6 +33,7 @@ func Root() *cobra.Command {
 		CaptureAskCmd(d),
 		AnswerCmd(d),
 		startCmd(d),
+		pairCmd(d),
 		WrapCmd(),
 		tui.TUICmd(d),
 	)
