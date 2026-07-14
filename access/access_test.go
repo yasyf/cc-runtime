@@ -2,7 +2,9 @@ package access
 
 import (
 	"os"
+	"path/filepath"
 	"regexp"
+	"sync"
 	"testing"
 )
 
@@ -95,5 +97,48 @@ func TestTokenLifecycle(t *testing.T) {
 	}
 	if perm := info.Mode().Perm(); perm != 0o600 {
 		t.Fatalf("token perm = %o, want 600", perm)
+	}
+}
+
+// TestEnsureTokenConcurrentFirstRun races first-run mints: every caller must
+// return the one token that landed on disk, never a token nobody can use.
+func TestEnsureTokenConcurrentFirstRun(t *testing.T) {
+	s := Store{Dir: t.TempDir()}
+
+	const racers = 8
+	tokens := make([]string, racers)
+	errs := make([]error, racers)
+	var wg sync.WaitGroup
+	for i := range racers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			tokens[i], errs[i] = s.EnsureToken()
+		}()
+	}
+	wg.Wait()
+
+	onDisk, err := s.ReadToken()
+	if err != nil {
+		t.Fatalf("ReadToken: %v", err)
+	}
+	if onDisk == "" {
+		t.Fatal("no token landed on disk")
+	}
+	for i := range racers {
+		if errs[i] != nil {
+			t.Fatalf("racer %d: %v", i, errs[i])
+		}
+		if tokens[i] != onDisk {
+			t.Fatalf("racer %d returned %q, want the on-disk token %q", i, tokens[i], onDisk)
+		}
+	}
+
+	leftovers, err := filepath.Glob(filepath.Join(s.Dir, ".token-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leftovers) != 0 {
+		t.Fatalf("temp mint files left behind: %v", leftovers)
 	}
 }

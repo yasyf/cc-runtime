@@ -95,7 +95,9 @@ func (s Store) ReadToken() (string, error) {
 }
 
 // EnsureToken returns the bearer token, generating and persisting a fresh one
-// the first time. It is idempotent: a second call returns the same token.
+// the first time. It is idempotent and race-safe: the fresh token publishes via
+// an exclusive link, so concurrent first runs all converge on the one token
+// that actually landed on disk.
 func (s Store) EnsureToken() (string, error) {
 	tok, err := s.ReadToken()
 	if err != nil {
@@ -104,26 +106,58 @@ func (s Store) EnsureToken() (string, error) {
 	if tok != "" {
 		return tok, nil
 	}
-	return s.writeToken()
+	fresh, tmp, err := s.mintTokenFile()
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(tmp)
+	if err := os.Link(tmp, s.TokenPath()); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return s.ReadToken()
+		}
+		return "", fmt.Errorf("publish token %q: %w", s.TokenPath(), err)
+	}
+	return fresh, nil
 }
 
-// ResetToken generates a fresh token, overwriting any existing one, and returns
-// it. The daemon must be restarted to pick the new token up.
-func (s Store) ResetToken() (string, error) { return s.writeToken() }
-
-// writeToken generates 32 crypto-random bytes as hex and writes them to the
-// token file (0600), creating the state dir if needed.
-func (s Store) writeToken() (string, error) {
-	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
+// ResetToken generates a fresh token, atomically replacing any existing one,
+// and returns it. The daemon must be restarted to pick the new token up.
+func (s Store) ResetToken() (string, error) {
+	fresh, tmp, err := s.mintTokenFile()
+	if err != nil {
 		return "", err
+	}
+	if err := os.Rename(tmp, s.TokenPath()); err != nil {
+		os.Remove(tmp)
+		return "", fmt.Errorf("write token %q: %w", s.TokenPath(), err)
+	}
+	return fresh, nil
+}
+
+// mintTokenFile generates 32 crypto-random bytes as hex into a same-dir temp
+// file (0600), creating the state dir if needed, and returns the token with
+// the temp path for the caller to publish.
+func (s Store) mintTokenFile() (token, path string, err error) {
+	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
+		return "", "", err
 	}
 	buf := make([]byte, 32)
 	if _, err := rand.Read(buf); err != nil {
-		return "", fmt.Errorf("generate token: %w", err)
+		return "", "", fmt.Errorf("generate token: %w", err)
 	}
 	tok := hex.EncodeToString(buf)
-	if err := os.WriteFile(s.TokenPath(), []byte(tok), 0o600); err != nil {
-		return "", fmt.Errorf("write token %q: %w", s.TokenPath(), err)
+	f, err := os.CreateTemp(s.Dir, ".token-")
+	if err != nil {
+		return "", "", fmt.Errorf("mint token: %w", err)
 	}
-	return tok, nil
+	if _, err := f.WriteString(tok); err != nil {
+		f.Close()
+		os.Remove(f.Name())
+		return "", "", fmt.Errorf("mint token: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(f.Name())
+		return "", "", fmt.Errorf("mint token: %w", err)
+	}
+	return tok, f.Name(), nil
 }
