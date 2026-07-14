@@ -62,4 +62,7 @@ require (
 	rsc.io/qr v0.2.0 // indirect
 )
 
-replace github.com/yasyf/cc-interact => /Users/yasyf/Code/cc-interact
+// TEMPORARY until cc-interact publishes the daemon seams cc-runtime rides
+// (cc-notes 6f1b937): builds need a sibling cc-interact checkout, which CI
+// clones alongside this repo.
+replace github.com/yasyf/cc-interact => ../cc-interact
