@@ -2,12 +2,22 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="manifest" href="/manifest.webmanifest" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
     <title>cc-runtime</title>
+    <script>
+      try {
+        // Duplicates STORAGE_KEY in src/theme.ts; keep both literals in sync.
+        var t = localStorage.getItem('cc-runtime:theme');
+        if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+      } catch (e) {}
+    </script>
+    <script type="module" crossorigin src="/assets/index-ymRV1bTw.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-YSiDhLhz.css">
   </head>
   <body>
     <div id="root"></div>
-    <p>cc-runtime web app placeholder — build the SPA into internal/web/dist to replace this shell.</p>
   </body>
 </html>
