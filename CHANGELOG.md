@@ -13,7 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   payloads, and `POST /api/subjects/{id}/answer` maps onto the socket answer
   op with the same idempotent dedup and edit-gate release.
 - The daemon serves an embedded single-page app at `/`, with deep links
-  falling back to the shell. A committed placeholder keeps `go build` green
+  falling back to the shell. index.html, the assets, and the service worker
+  serve outside the auth guard so a remote browser can bootstrap; `/events`
+  and `/api` stay behind it. A committed placeholder keeps `go build` green
   until the real web build lands in `internal/web/dist`.
 - `cc-runtime pair` exposes the daemon to the LAN behind a minted bearer token,
   prints a QR code plus copyable pair payload, and advertises `_cc-runtime._tcp`
@@ -29,5 +31,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   notification fans out to all subscriptions, and an endpoint the push
   service reports gone with a 404 or 410 is pruned.
 - Initial scaffolding.
+
+### Security
+- Subscription registration is bounded. The body caps at 8 KiB, endpoint and
+  key lengths are limited, and the stored set caps at 32 subscriptions;
+  re-registering a stored endpoint always passes.
+- Rotating the pair token or turning remote access off (`pair --off`) now
+  revokes every stored Web Push subscription behind durable unsubscribe
+  events, so a leaked bearer cannot buy push delivery forever.
+- `pair` advertises private-range (RFC 1918) LAN addresses only; a globally
+  routable interface address never enters the QR payload.
+
+### Fixed
+- Two concurrent answers to the same question can no longer split the event
+  log from the projection: the loser of the deduplicated append projects the
+  winner's answer.
+- Concurrent first-run `pair` invocations converge on the one bearer token
+  that landed on disk instead of each minting their own.
+- `pair` verifies the running daemon's version and listener set before reuse.
+  A stale daemon is upgraded, a daemon missing the tailnet TLS leg is
+  restarted, and the QR carries the tailnet URL only when the handshake shows
+  a live listener.
+- Push delivery goroutines now run on the daemon lifecycle: shutdown cancels
+  in-flight sends and drains them before the store closes.
+- Builds no longer depend on an absolute local path: the temporary
+  `cc-interact` replace is the relative sibling checkout, which CI clones.
 
 [Unreleased]: https://github.com/yasyf/cc-runtime/commits/main
