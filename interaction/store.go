@@ -3,6 +3,7 @@ package interaction
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -166,6 +167,26 @@ func openCount(ctx context.Context, db *sql.DB, subjectID string) (int, error) {
 		return 0, fmt.Errorf("count open questions: %w", err)
 	}
 	return open, nil
+}
+
+// durableAnswer returns the answer projection payload for the event at seq —
+// the answer actually durable in the log, which under a dedup-key race is the
+// first writer's, not the caller's own.
+func durableAnswer(ctx context.Context, db *sql.DB, subjectID string, seq int64) (string, error) {
+	var wire string
+	if err := db.QueryRowContext(ctx,
+		`SELECT payload FROM events WHERE subject_id=? AND seq=?`, subjectID, seq).Scan(&wire); err != nil {
+		return "", fmt.Errorf("read durable answer: %w", err)
+	}
+	var a AnswerPayload
+	if err := json.Unmarshal([]byte(wire), &a); err != nil {
+		return "", fmt.Errorf("parse durable answer: %w", err)
+	}
+	payload, err := json.Marshal(a)
+	if err != nil {
+		return "", err
+	}
+	return string(payload), nil
 }
 
 // recordAnswer marks a question answered and, when it was the last open one,

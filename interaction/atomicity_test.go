@@ -4,10 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/yasyf/cc-interact/daemon"
+	"github.com/yasyf/cc-interact/event"
+	"github.com/yasyf/cc-interact/store"
 )
 
 // openDaemonDB opens a second connection to the harness daemon's on-disk
@@ -122,6 +125,54 @@ func TestMultiAskAppendFailureNeverIdlesOpenSubject(t *testing.T) {
 	}
 	if got := subjectStatusDirect(t, db, subjectID); got != StatusIdle {
 		t.Fatalf("status after answering q2 = %q, want idle", got)
+	}
+}
+
+// TestRacingAnswersConvergeOnDurableAnswer reproduces the split-brain race:
+// racer A's answer event lands durably while racer B has already passed the
+// answered=0 pre-check. B's own append dedups to A's seq, so B must project
+// A's answer — the log and pending_questions never disagree.
+func TestRacingAnswersConvergeOnDurableAnswer(t *testing.T) {
+	h := newHarness(t)
+	subjectID, questionID := h.ask(sampleQuestion("pick"))
+	db := h.openDaemonDB()
+	ctx := context.Background()
+
+	st, err := store.Open(h.paths.DBPath(), nil)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	// Racer A: durable append, projection not yet run.
+	a := AnswerPayload{SubjectID: subjectID, QuestionID: questionID, Selected: []string{"A"}}
+	if _, err := st.AppendEvent(ctx, &event.Event{
+		SubjectID: subjectID, Origin: event.OriginHuman, Type: EventAnswer,
+		Payload:  wireEvent(EventAnswer, a),
+		DedupKey: "answer:" + subjectID + ":" + strconv.FormatInt(questionID, 10),
+	}); err != nil {
+		t.Fatalf("append racer A: %v", err)
+	}
+
+	// Racer B: full applyAnswer with a different selection.
+	b := AnswerPayload{SubjectID: subjectID, QuestionID: questionID, Selected: []string{"B"}}
+	idled, err := applyAnswer(ctx, db, st.AppendEvent, b)
+	if err != nil {
+		t.Fatalf("applyAnswer racer B: %v", err)
+	}
+	if !idled {
+		t.Fatal("answering the only open question must idle the subject")
+	}
+
+	if got := countAnswerEvents(t, db, subjectID); got != 1 {
+		t.Fatalf("answer events = %d, want 1 (dedup)", got)
+	}
+	var stored AnswerPayload
+	if err := json.Unmarshal([]byte(storedAnswer(t, db, subjectID, questionID)), &stored); err != nil {
+		t.Fatalf("parse stored answer: %v", err)
+	}
+	if len(stored.Selected) != 1 || stored.Selected[0] != "A" {
+		t.Fatalf("projected answer = %v, want the durable answer [A]", stored.Selected)
 	}
 }
 

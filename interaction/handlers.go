@@ -205,8 +205,12 @@ func handleAnswer(hc daemon.HandlerCtx) daemon.Reply {
 // the gate is subjects.status, never the answer event's seq). Ordering:
 // pre-validate → Append → project, so the gate releases only on an answer
 // durably in the log, and a retry of a partially-applied answer re-Appends (a
-// deduped no-op) and re-runs the projection to completion. The returned bool
-// reports whether the subject idled (the gate released).
+// deduped no-op) and re-runs the projection to completion. The projection
+// writes the payload read back from the appended seq, not this request's: two
+// racers that both pass the answered pre-check share a dedup key, so the loser
+// gets the winner's seq back and projects the winner's answer — log and
+// projection can never split. The returned bool reports whether the subject
+// idled (the gate released).
 func applyAnswer(ctx context.Context, db *sql.DB, append daemon.AppendFunc, a AnswerPayload) (bool, error) {
 	known, answered, err := questionState(ctx, db, a.SubjectID, a.QuestionID)
 	if err != nil {
@@ -225,12 +229,12 @@ func applyAnswer(ctx context.Context, db *sql.DB, append daemon.AppendFunc, a An
 		return open == 0, nil
 	}
 
-	payload, _ := json.Marshal(a)
-	if _, err := append(ctx, &event.Event{
+	seq, err := append(ctx, &event.Event{
 		SubjectID: a.SubjectID, Origin: event.OriginHuman, Type: EventAnswer,
 		Payload:  wireEvent(EventAnswer, a),
 		DedupKey: "answer:" + a.SubjectID + ":" + strconv.FormatInt(a.QuestionID, 10),
-	}); err != nil {
+	})
+	if err != nil {
 		return false, err
 	}
 
@@ -238,10 +242,14 @@ func applyAnswer(ctx context.Context, db *sql.DB, append daemon.AppendFunc, a An
 	// ctx cannot abandon it; on failure the status stays awaiting (fail-closed).
 	cctx, cancel := cleanupCtx()
 	defer cancel()
+	payload, err := durableAnswer(cctx, db, a.SubjectID, seq)
+	if err != nil {
+		return false, err
+	}
 	var idled bool
 	if err := withBusyRetry(cctx, func() error {
 		var err error
-		idled, err = recordAnswer(cctx, db, a.SubjectID, a.QuestionID, string(payload))
+		idled, err = recordAnswer(cctx, db, a.SubjectID, a.QuestionID, payload)
 		return err
 	}); err != nil {
 		return false, err
