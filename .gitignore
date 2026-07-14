@@ -23,3 +23,8 @@ __pycache__/
 # Plugin binary (built locally or installed at runtime, never committed)
 /plugin/bin/*
 !/plugin/bin/.gitkeep
+
+# Embedded SPA build output — rebuilt by the web build; keep only the committed
+# placeholder so a clean tree compiles with no web toolchain.
+/internal/web/dist/*
+!/internal/web/dist/index.html

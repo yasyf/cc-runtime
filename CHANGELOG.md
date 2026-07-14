@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counts, `GET /api/subjects/{id}/pending` returns open questions with full
   payloads, and `POST /api/subjects/{id}/answer` maps onto the socket answer
   op with the same idempotent dedup and edit-gate release.
+- The daemon serves an embedded single-page app at `/`, with deep links
+  falling back to the shell. A committed placeholder keeps `go build` green
+  until the real web build lands in `internal/web/dist`.
 - `cc-runtime pair` exposes the daemon to the LAN behind a minted bearer token,
   prints a QR code plus copyable pair payload, and advertises `_cc-runtime._tcp`
   over Bonjour. `--off` returns to loopback only; `--reset-token` rotates the

@@ -7,9 +7,11 @@ import (
 
 	"github.com/yasyf/cc-interact/channel"
 	"github.com/yasyf/cc-interact/daemon"
+	"github.com/yasyf/cc-interact/sse"
 
 	"github.com/yasyf/cc-runtime/access"
 	"github.com/yasyf/cc-runtime/interaction"
+	"github.com/yasyf/cc-runtime/internal/web"
 	"github.com/yasyf/cc-runtime/version"
 )
 
@@ -63,6 +65,9 @@ func buildServer(ctx context.Context) (*daemon.Server, error) {
 	sender := access.NewPushSender(vapid, s.DB(), s.Append)
 	access.MountPush(s.Mux(), sender)
 	interaction.MountREST(s)
+	// Catch-all SPA mount; the pattern mux keeps /events and /api routes ahead
+	// of it, and the auth handler wraps them all.
+	s.Mux().Handle("/", sse.StaticHandler(web.Dist()))
 	interaction.Register(s, pushFanout{sender: sender})
 	return s, nil
 }

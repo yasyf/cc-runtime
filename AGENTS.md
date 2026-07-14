@@ -16,6 +16,7 @@ cc-runtime/
 ├── version/            # Build version metadata
 ├── runtime/            # Runtime core — harness-tool implementations
 ├── interaction/        # Interaction domain (questions, notifications)
+├── internal/web/       # Embedded SPA build output served at / (committed placeholder)
 ├── tui/                # Terminal UI
 ├── plugin/             # Claude Code plugin — MCP channel tools + hooks
 ├── AGENTS.md           # This file — shared conventions
