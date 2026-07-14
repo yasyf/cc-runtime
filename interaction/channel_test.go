@@ -41,7 +41,7 @@ func newChannelHarness(t *testing.T) *channelHarness {
 	if err != nil {
 		t.Fatalf("daemon.New: %v", err)
 	}
-	Register(s)
+	Register(s, &recordingFanout{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)

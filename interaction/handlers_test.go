@@ -32,12 +32,48 @@ const (
 	testScope   = "/scope/a"
 )
 
+// recordingFanout captures every fan-out hook invocation for assertions.
+type recordingFanout struct {
+	mu            sync.Mutex
+	questions     []fanoutQuestion
+	notifications []fanoutNotification
+}
+
+type fanoutQuestion struct {
+	subjectID string
+	q         QuestionPayload
+}
+
+type fanoutNotification struct {
+	subjectID string
+	n         NotificationPayload
+}
+
+func (f *recordingFanout) Question(subjectID string, q QuestionPayload) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.questions = append(f.questions, fanoutQuestion{subjectID: subjectID, q: q})
+}
+
+func (f *recordingFanout) Notification(subjectID string, n NotificationPayload) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.notifications = append(f.notifications, fanoutNotification{subjectID: subjectID, n: n})
+}
+
+func (f *recordingFanout) snapshot() ([]fanoutQuestion, []fanoutNotification) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]fanoutQuestion(nil), f.questions...), append([]fanoutNotification(nil), f.notifications...)
+}
+
 // harness is a real daemon driven over its unix socket: handlers run against an
 // ephemeral on-disk SQLite the daemon owns, exactly as in production.
 type harness struct {
 	t      *testing.T
 	client *daemon.Client
 	paths  paths.Paths
+	fanout *recordingFanout
 }
 
 func newHarness(t *testing.T) *harness {
@@ -57,7 +93,8 @@ func newHarness(t *testing.T) *harness {
 	if err != nil {
 		t.Fatalf("daemon.New: %v", err)
 	}
-	Register(s)
+	fanout := &recordingFanout{}
+	Register(s, fanout)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -79,7 +116,7 @@ func newHarness(t *testing.T) *harness {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	return &harness{t: t, client: client, paths: p}
+	return &harness{t: t, client: client, paths: p, fanout: fanout}
 }
 
 func (h *harness) do(env daemon.Envelope) daemon.Reply {
@@ -345,6 +382,49 @@ func TestHandleAnswerPollReportsAnswer(t *testing.T) {
 	}
 	if ans.QuestionID != questionID || len(ans.Selected) != 1 || ans.Selected[0] != "yes" {
 		t.Fatalf("poll answer = %+v, want question %d selected [yes]", ans, questionID)
+	}
+}
+
+func TestFanoutFiresOnDurableAppendsOnly(t *testing.T) {
+	h := newHarness(t)
+	subjectID, questionID := h.ask(sampleQuestion("deploy?"))
+
+	questions, notifications := h.fanout.snapshot()
+	if len(questions) != 1 || len(notifications) != 0 {
+		t.Fatalf("after ask: %d questions, %d notifications fanned out, want 1 and 0", len(questions), len(notifications))
+	}
+	if questions[0].subjectID != subjectID || questions[0].q.Header != "deploy?" || questions[0].q.Prompt != "pick one" {
+		t.Fatalf("fanned-out question = %+v, want subject %s header deploy? prompt pick one", questions[0], subjectID)
+	}
+
+	r := h.do(h.agentEnv(OpNotify, NotificationPayload{Message: "heads up", Urgency: "low"}))
+	if !r.OK {
+		t.Fatalf("notify: %s", r.Error)
+	}
+	questions, notifications = h.fanout.snapshot()
+	if len(questions) != 1 || len(notifications) != 1 {
+		t.Fatalf("after notify: %d questions, %d notifications fanned out, want 1 and 1", len(questions), len(notifications))
+	}
+	if notifications[0].subjectID != subjectID || notifications[0].n.Message != "heads up" || notifications[0].n.Urgency != "low" {
+		t.Fatalf("fanned-out notification = %+v, want subject %s message heads up urgency low", notifications[0], subjectID)
+	}
+
+	r = h.do(h.agentEnv(OpCaptureQuestion, QuestionPayload{Header: "native", Prompt: "which?"}))
+	if !r.OK {
+		t.Fatalf("capture-question: %s", r.Error)
+	}
+	questions, notifications = h.fanout.snapshot()
+	if len(questions) != 1 || len(notifications) != 2 {
+		t.Fatalf("after capture-question: %d questions, %d notifications fanned out, want 1 and 2 (a captured question mirrors as a notification)", len(questions), len(notifications))
+	}
+	if notifications[1].n.Message != "native: which?" {
+		t.Fatalf("captured-question fanout message = %q, want %q", notifications[1].n.Message, "native: which?")
+	}
+
+	h.answer(subjectID, questionID)
+	questions, notifications = h.fanout.snapshot()
+	if len(questions) != 1 || len(notifications) != 2 {
+		t.Fatalf("after answer: %d questions, %d notifications fanned out, want unchanged 1 and 2 (answers never fan out)", len(questions), len(notifications))
 	}
 }
 

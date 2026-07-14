@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"database/sql"
 	"net"
 
 	"github.com/yasyf/cc-interact/channel"
@@ -13,8 +14,9 @@ import (
 )
 
 // buildServer composes the cc-runtime daemon: the interaction ops, the edit
-// gate, the projection schema, the channel presence lifecycle, and the access
-// plane (bind, token, Bonjour, tailnet TLS) from persisted access config.
+// gate, the projection schema, the channel presence lifecycle, the access
+// plane (bind, token, Bonjour, tailnet TLS) from persisted access config, and
+// the Web Push surface feeding every question/notification append.
 func buildServer(ctx context.Context) (*daemon.Server, error) {
 	st := access.Store{Dir: interaction.AppPaths().StateDir()}
 	acfg, err := st.ReadConfig()
@@ -22,6 +24,10 @@ func buildServer(ctx context.Context) (*daemon.Server, error) {
 		return nil, err
 	}
 	token, err := st.ReadToken()
+	if err != nil {
+		return nil, err
+	}
+	vapid, err := st.EnsureVAPID()
 	if err != nil {
 		return nil, err
 	}
@@ -34,7 +40,7 @@ func buildServer(ctx context.Context) (*daemon.Server, error) {
 		ActiveStatuses:    interaction.ActiveStatuses,
 		Gate:              interaction.Gate(),
 		GateErrorReason:   interaction.GateErrorReason,
-		Migrate:           interaction.Migrate,
+		Migrate:           migrate,
 		PresenceEventType: conn.Type(),
 		OnPresenceChange:  conn.OnPresenceChange,
 		BootReconcile:     conn.BootReconcile,
@@ -54,8 +60,19 @@ func buildServer(ctx context.Context) (*daemon.Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	interaction.Register(s)
+	sender := access.NewPushSender(vapid, s.DB(), s.Append)
+	access.MountPush(s.Mux(), sender)
+	interaction.Register(s, pushFanout{sender: sender})
 	return s, nil
+}
+
+// migrate layers the interaction projection and the push-plane schema onto
+// cc-interact's core tables.
+func migrate(ctx context.Context, db *sql.DB) error {
+	if err := interaction.Migrate(ctx, db); err != nil {
+		return err
+	}
+	return access.PushMigrate(ctx, db)
 }
 
 func serve(ctx context.Context) error {

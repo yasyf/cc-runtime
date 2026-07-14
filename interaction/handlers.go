@@ -49,17 +49,31 @@ type listReply struct {
 	HTTPPort int             `json:"http_port"`
 }
 
+// Fanout carries every durably appended question and notification beyond the
+// SSE plane (Web Push). Handlers invoke it inline after Append succeeds, so
+// implementations return immediately and deliver in the background.
+type Fanout interface {
+	Question(subjectID string, q QuestionPayload)
+	Notification(subjectID string, n NotificationPayload)
+}
+
+// handlers binds the append-observing ops to the fan-out they feed.
+type handlers struct {
+	fanout Fanout
+}
+
 // Register wires every interaction op onto the daemon.
-func Register(s *daemon.Server) {
+func Register(s *daemon.Server, fanout Fanout) {
+	h := handlers{fanout: fanout}
 	s.Register(OpStart, handleStart)
-	s.Register(OpAsk, handleAsk)
-	s.Register(OpNotify, handleNotify)
+	s.Register(OpAsk, h.handleAsk)
+	s.Register(OpNotify, h.handleNotify)
 	s.Register(OpAnswer, handleAnswer)
 	s.Register(OpAnswerPoll, handleAnswerPoll)
 	s.Register(OpPending, handlePending)
 	s.Register(OpList, handleList)
-	s.Register(OpCaptureNotification, handleCaptureNotification)
-	s.Register(OpCaptureQuestion, handleCaptureQuestion)
+	s.Register(OpCaptureNotification, h.handleCaptureNotification)
+	s.Register(OpCaptureQuestion, h.handleCaptureQuestion)
 }
 
 func handleStart(hc daemon.HandlerCtx) daemon.Reply {
@@ -100,7 +114,7 @@ func handleStart(hc daemon.HandlerCtx) daemon.Reply {
 // pre-flip+separate-insert split this replaces had a window where status=awaiting
 // but the new row was absent, so an interleaved recordAnswer could idle the
 // subject and then the insert would land an open row under an idle (released) gate.
-func handleAsk(hc daemon.HandlerCtx) daemon.Reply {
+func (h handlers) handleAsk(hc daemon.HandlerCtx) daemon.Reply {
 	var q QuestionPayload
 	if err := json.Unmarshal(hc.Env.Body, &q); err != nil {
 		return daemon.Reply{OK: false, Error: "bad question body: " + err.Error()}
@@ -137,11 +151,12 @@ func handleAsk(hc daemon.HandlerCtx) daemon.Reply {
 		_ = setSubjectStatus(ctx, hc.DB, sub.ID, StatusAwaiting)
 		return daemon.Reply{OK: false, Error: err.Error()}
 	}
+	h.fanout.Question(sub.ID, q)
 	body, _ := json.Marshal(askReply{SubjectID: sub.ID, QuestionID: seq})
 	return daemon.Reply{OK: true, SubjectID: sub.ID, Body: body}
 }
 
-func handleNotify(hc daemon.HandlerCtx) daemon.Reply {
+func (h handlers) handleNotify(hc daemon.HandlerCtx) daemon.Reply {
 	var n NotificationPayload
 	if err := json.Unmarshal(hc.Env.Body, &n); err != nil {
 		return daemon.Reply{OK: false, Error: "bad notification body: " + err.Error()}
@@ -155,6 +170,7 @@ func handleNotify(hc daemon.HandlerCtx) daemon.Reply {
 	}); err != nil {
 		return daemon.Reply{OK: false, Error: err.Error()}
 	}
+	h.fanout.Notification(sub.ID, n)
 	return daemon.Reply{OK: true, SubjectID: sub.ID, Body: json.RawMessage(`{"ok":true}`)}
 }
 
@@ -265,7 +281,7 @@ func handleList(hc daemon.HandlerCtx) daemon.Reply {
 	return daemon.Reply{OK: true, HTTPPort: hc.HTTPPort, Body: body}
 }
 
-func handleCaptureNotification(hc daemon.HandlerCtx) daemon.Reply {
+func (h handlers) handleCaptureNotification(hc daemon.HandlerCtx) daemon.Reply {
 	var n NotificationPayload
 	if err := json.Unmarshal(hc.Env.Body, &n); err != nil {
 		return daemon.Reply{OK: false, Error: "bad notification body: " + err.Error()}
@@ -282,6 +298,7 @@ func handleCaptureNotification(hc daemon.HandlerCtx) daemon.Reply {
 	}); err != nil {
 		return daemon.Reply{OK: false, Error: err.Error()}
 	}
+	h.fanout.Notification(sub.ID, n)
 	return daemon.Reply{OK: true, SubjectID: sub.ID, Body: json.RawMessage(`{"ok":true}`)}
 }
 
@@ -298,7 +315,7 @@ func handleCaptureNotification(hc daemon.HandlerCtx) daemon.Reply {
 // and never inflates the open-question count. Shape mirrors
 // handleCaptureNotification: Find subject → Append, OriginSystem, no status
 // mutation.
-func handleCaptureQuestion(hc daemon.HandlerCtx) daemon.Reply {
+func (h handlers) handleCaptureQuestion(hc daemon.HandlerCtx) daemon.Reply {
 	var q QuestionPayload
 	if err := json.Unmarshal(hc.Env.Body, &q); err != nil {
 		return daemon.Reply{OK: false, Error: "bad question body: " + err.Error()}
@@ -316,6 +333,7 @@ func handleCaptureQuestion(hc daemon.HandlerCtx) daemon.Reply {
 	}); err != nil {
 		return daemon.Reply{OK: false, Error: err.Error()}
 	}
+	h.fanout.Notification(sub.ID, n)
 	return daemon.Reply{OK: true, SubjectID: sub.ID, Body: json.RawMessage(`{"ok":true}`)}
 }
 
