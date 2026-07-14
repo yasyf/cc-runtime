@@ -68,7 +68,8 @@ func runPair(ctx context.Context, d cmd.Deps, out io.Writer, resetToken bool) er
 	}
 	tokenChanged := resetToken || prev == ""
 
-	info, err := ensureDaemon(ctx, d, access.BindLAN, tokenChanged)
+	ts, tsOK := access.DetectTailscale(ctx)
+	info, err := ensureDaemon(ctx, d, access.BindLAN, tokenChanged, tsOK)
 	if err != nil {
 		return err
 	}
@@ -85,8 +86,9 @@ func runPair(ctx context.Context, d cmd.Deps, out io.Writer, resetToken bool) er
 	for _, ip := range ips {
 		urls = append(urls, fmt.Sprintf("http://%s:%d", ip, info.Port))
 	}
-	ts, tsOK := access.DetectTailscale(ctx)
-	if tsOK {
+	// Advertise the tailnet leg only when the daemon's handshake shows a live
+	// extra listener — never a URL nothing serves.
+	if tsOK && len(info.ExtraAddrs) > 0 {
 		urls = append(urls, fmt.Sprintf("https://%s:%d", ts.FQDN, access.TLSPort))
 	}
 
@@ -125,7 +127,7 @@ func runPairOff(ctx context.Context, d cmd.Deps, out io.Writer) error {
 	if err := setBind(accessStore(), access.BindLoopback); err != nil {
 		return err
 	}
-	if _, err := ensureDaemon(ctx, d, access.BindLoopback, false); err != nil {
+	if _, err := ensureDaemon(ctx, d, access.BindLoopback, false, false); err != nil {
 		return err
 	}
 	fmt.Fprintln(out, "remote access disabled; the daemon now binds 127.0.0.1 only")
@@ -146,26 +148,33 @@ func setBind(st access.Store, bind string) error {
 	return st.WriteConfig(cfg)
 }
 
-// ensureDaemon brings a daemon bound to desiredBind online and returns its
-// published handshake. A running daemon is restarted when its effective bind
-// differs or the token changed; otherwise a stopped daemon is cold-started.
-func ensureDaemon(ctx context.Context, d cmd.Deps, desiredBind string, tokenChanged bool) (daemon.HTTPInfo, error) {
-	client := d.NewClient()
-	if client.Available() {
-		info := readHTTPInfo(d.Paths)
-		if tokenChanged || effectiveBind(info.Bind) != desiredBind {
-			if err := restartDaemon(ctx, d, client); err != nil {
-				return daemon.HTTPInfo{}, err
-			}
-		}
-	} else if err := d.EnsureCurrent(ctx); err != nil {
+// ensureDaemon brings a current-version daemon bound to desiredBind online and
+// returns its published handshake. EnsureCurrent cold-starts an absent daemon
+// and upgrades a stale one; a live current daemon is then restarted when its
+// bind, token, or extra-listener set (the tailnet TLS leg pair advertises) no
+// longer matches what pairing hands out.
+func ensureDaemon(ctx context.Context, d cmd.Deps, desiredBind string, tokenChanged, wantTLS bool) (daemon.HTTPInfo, error) {
+	if err := d.EnsureCurrent(ctx); err != nil {
 		return daemon.HTTPInfo{}, err
 	}
 	info := readHTTPInfo(d.Paths)
+	if needsRestart(info, desiredBind, tokenChanged, wantTLS) {
+		if err := restartDaemon(ctx, d, d.NewClient()); err != nil {
+			return daemon.HTTPInfo{}, err
+		}
+		info = readHTTPInfo(d.Paths)
+	}
 	if info.Port == 0 {
 		return daemon.HTTPInfo{}, errors.New("daemon did not publish its HTTP port")
 	}
 	return info, nil
+}
+
+// needsRestart reports whether the running daemon no longer matches what
+// pairing will advertise: the token changed, the effective bind differs, or
+// the TLS leg's presence disagrees with tailscale availability.
+func needsRestart(info daemon.HTTPInfo, desiredBind string, tokenChanged, wantTLS bool) bool {
+	return tokenChanged || effectiveBind(info.Bind) != desiredBind || wantTLS != (len(info.ExtraAddrs) > 0)
 }
 
 // restartDaemon steps the running daemon down, waits for it to release the
