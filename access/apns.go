@@ -1,0 +1,358 @@
+package access
+
+import (
+	"bytes"
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strconv"
+	"sync"
+	"time"
+
+	"github.com/yasyf/cc-interact/daemon"
+	"github.com/yasyf/cc-interact/event"
+	"golang.org/x/net/http2"
+)
+
+// Event types appended to the push subject's log for the APNs device registry.
+const (
+	EventPushDeviceRegister   = "push.device_register"
+	EventPushDeviceUnregister = "push.device_unregister"
+)
+
+// APNs delivery hosts; Sandbox in APNSConfig picks the second.
+const (
+	apnsHost        = "https://api.push.apple.com"
+	apnsSandboxHost = "https://api.sandbox.push.apple.com"
+)
+
+// Registration bounds, mirroring the Web Push subscription bounds: the body
+// cap rejects oversized frames before decoding, the token bounds cover
+// Apple's variable-length hex tokens, and the set cap bounds the goroutines +
+// outbound sockets every fan-out spawns per stored row.
+const (
+	maxDeviceRegistrationBytes = 1 << 10
+	minDeviceTokenChars        = 64
+	maxDeviceTokenChars        = 200
+	maxDeviceTokens            = 32
+)
+
+// devicePlatform is the only platform the registry accepts today.
+const devicePlatform = "ios"
+
+// ErrDeviceTokenLimit rejects a registration that would grow the stored
+// device-token set beyond maxDeviceTokens.
+var ErrDeviceTokenLimit = fmt.Errorf("device token limit (%d) reached", maxDeviceTokens)
+
+// apnsSchema projects the current device-token set out of the push event log,
+// keyed by token (the dedupe key); the log stays the durable record. It layers
+// on PushMigrate, which inserts the well-known push subject the rows reference.
+const apnsSchema = `
+CREATE TABLE IF NOT EXISTS apns_device_tokens (
+  token      TEXT PRIMARY KEY,
+  platform   TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+`
+
+// APNSMigrate applies the APNs registry schema on top of the push plane's.
+func APNSMigrate(ctx context.Context, db *sql.DB) error {
+	if _, err := db.ExecContext(ctx, apnsSchema); err != nil {
+		return fmt.Errorf("apply apns schema: %w", err)
+	}
+	return nil
+}
+
+// deviceRegistration is the wire frame a client POSTs to register its APNs
+// device token.
+type deviceRegistration struct {
+	Token    string `json:"token"`
+	Platform string `json:"platform"`
+}
+
+// apnsEventFrame is the self-contained log payload for device register and
+// unregister events, mirroring pushEventFrame.
+type apnsEventFrame struct {
+	Type     string `json:"type"`
+	Token    string `json:"token"`
+	Platform string `json:"platform,omitempty"`
+}
+
+// apnsBody is the alert APNs delivers to a device. It carries the compact
+// push frame under "payload" and never the pair bearer token.
+type apnsBody struct {
+	APS     apnsAPS   `json:"aps"`
+	Payload apnsFrame `json:"payload"`
+}
+
+type apnsAPS struct {
+	Alert    apnsAlert `json:"alert"`
+	Sound    string    `json:"sound"`
+	ThreadID string    `json:"thread-id"`
+}
+
+type apnsAlert struct {
+	Title string `json:"title,omitempty"`
+	Body  string `json:"body"`
+}
+
+type apnsFrame struct {
+	Type    string `json:"type"`
+	Subject string `json:"subject"`
+	Urgency string `json:"urgency,omitempty"`
+}
+
+// httpDoer is the injected network boundary an APNSSender delivers through.
+type httpDoer interface {
+	Do(*http.Request) (*http.Response, error)
+}
+
+// APNSSender fans frames out to every registered device token over HTTP/2,
+// authenticating with the cached ES256 provider token. The HTTP client is the
+// injected network boundary; signing, registration, and pruning are real.
+type APNSSender struct {
+	auth   *apnsAuth
+	topic  string
+	host   string
+	db     *sql.DB
+	append daemon.AppendFunc
+	client httpDoer
+	now    func() time.Time
+}
+
+// NewAPNSSender builds a sender from an enabled config, loading the .p8 key
+// it references — a configured lane with a broken key fails loudly. Delivery
+// rides a dedicated HTTP/2 transport (APNs requires h2), bounded per fan-out
+// by the caller's context.
+func NewAPNSSender(cfg APNSConfig, db *sql.DB, append daemon.AppendFunc) (*APNSSender, error) {
+	key, err := LoadAPNSKey(cfg.KeyPath)
+	if err != nil {
+		return nil, err
+	}
+	host := apnsHost
+	if cfg.Sandbox {
+		host = apnsSandboxHost
+	}
+	return &APNSSender{
+		auth:   &apnsAuth{key: key, keyID: cfg.KeyID, teamID: cfg.TeamID},
+		topic:  cfg.BundleID,
+		host:   host,
+		db:     db,
+		append: append,
+		client: &http.Client{Transport: &http2.Transport{}},
+		now:    time.Now,
+	}, nil
+}
+
+// Register durably stores a device token: append the register event (deduped
+// by token), then project the row — append-first, like every interaction
+// write. A registration that would grow the stored set beyond maxDeviceTokens
+// is refused (ErrDeviceTokenLimit); re-registering a stored token always
+// passes.
+func (a *APNSSender) Register(ctx context.Context, token, platform string) error {
+	var others int
+	if err := a.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM apns_device_tokens WHERE token<>?`, token).Scan(&others); err != nil {
+		return fmt.Errorf("count device tokens: %w", err)
+	}
+	if others >= maxDeviceTokens {
+		return ErrDeviceTokenLimit
+	}
+	frame, err := json.Marshal(apnsEventFrame{Type: EventPushDeviceRegister, Token: token, Platform: platform})
+	if err != nil {
+		return err
+	}
+	if _, err := a.append(ctx, &event.Event{
+		SubjectID: PushSubjectID, Origin: event.OriginHuman, Type: EventPushDeviceRegister,
+		Payload: frame, DedupKey: "device:" + token,
+	}); err != nil {
+		return fmt.Errorf("append device registration: %w", err)
+	}
+	if _, err := a.db.ExecContext(ctx,
+		`INSERT INTO apns_device_tokens(token, platform, created_at) VALUES(?,?,?)
+		 ON CONFLICT(token) DO UPDATE SET platform=excluded.platform`,
+		token, platform, time.Now().UnixMilli()); err != nil {
+		return fmt.Errorf("project device token: %w", err)
+	}
+	return nil
+}
+
+// Fanout delivers payload to every registered device token in parallel. A
+// token APNs reports unregistered (410, or 400 BadDeviceToken) is pruned —
+// its row deleted behind a durable unregister event — and does not count as
+// a failure; any other non-2xx or transport error does.
+func (a *APNSSender) Fanout(ctx context.Context, payload PushPayload) error {
+	tokens, err := a.tokens(ctx)
+	if err != nil {
+		return err
+	}
+	if len(tokens) == 0 {
+		return nil
+	}
+	body, err := json.Marshal(apnsBody{
+		APS: apnsAPS{
+			Alert:    apnsAlert{Title: payload.Title, Body: payload.Body},
+			Sound:    "default",
+			ThreadID: payload.Subject,
+		},
+		Payload: apnsFrame{Type: payload.Type, Subject: payload.Subject, Urgency: payload.Urgency},
+	})
+	if err != nil {
+		return err
+	}
+	bearer, err := a.auth.bearer(a.now())
+	if err != nil {
+		return err
+	}
+	priority := apnsPriority(payload.Urgency)
+	expiration := strconv.FormatInt(a.now().Add(pushTTL*time.Second).Unix(), 10)
+	errs := make([]error, len(tokens))
+	var wg sync.WaitGroup
+	for i, token := range tokens {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = a.send(ctx, body, token, bearer, priority, expiration)
+		}()
+	}
+	wg.Wait()
+	return errors.Join(errs...)
+}
+
+// send POSTs one alert to APNs. The provider token authenticates the daemon;
+// the pair bearer token never rides the request.
+func (a *APNSSender) send(ctx context.Context, body []byte, token, bearer, priority, expiration string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.host+"/3/device/"+token, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "bearer "+bearer)
+	req.Header.Set("Apns-Topic", a.topic)
+	req.Header.Set("Apns-Push-Type", "alert")
+	req.Header.Set("Apns-Priority", priority)
+	req.Header.Set("Apns-Expiration", expiration)
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("apns %s: %w", token, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusOK {
+		return nil
+	}
+	reason := apnsReason(resp.Body)
+	if resp.StatusCode == http.StatusGone || (resp.StatusCode == http.StatusBadRequest && reason == "BadDeviceToken") {
+		return a.prune(ctx, token)
+	}
+	return fmt.Errorf("apns %s: status %d reason %q", token, resp.StatusCode, reason)
+}
+
+// prune retires an unregistered device token: durable unregister event first,
+// then the projection delete, mirroring the append-then-project write order.
+func (a *APNSSender) prune(ctx context.Context, token string) error {
+	frame, err := json.Marshal(apnsEventFrame{Type: EventPushDeviceUnregister, Token: token})
+	if err != nil {
+		return err
+	}
+	if _, err := a.append(ctx, &event.Event{
+		SubjectID: PushSubjectID, Origin: event.OriginSystem, Type: EventPushDeviceUnregister, Payload: frame,
+	}); err != nil {
+		return fmt.Errorf("append device unregister %s: %w", token, err)
+	}
+	if _, err := a.db.ExecContext(ctx, `DELETE FROM apns_device_tokens WHERE token=?`, token); err != nil {
+		return fmt.Errorf("prune device token %s: %w", token, err)
+	}
+	return nil
+}
+
+// tokens loads the projected device-token set, token-ordered.
+func (a *APNSSender) tokens(ctx context.Context) ([]string, error) {
+	rows, err := a.db.QueryContext(ctx, `SELECT token FROM apns_device_tokens ORDER BY token`)
+	if err != nil {
+		return nil, fmt.Errorf("list device tokens: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var token string
+		if err := rows.Scan(&token); err != nil {
+			return nil, fmt.Errorf("scan device token: %w", err)
+		}
+		out = append(out, token)
+	}
+	return out, rows.Err()
+}
+
+// apnsPriority maps the RFC 8030 urgency onto Apple's scale: 10 (immediate)
+// for high, 5 (power-considerate) otherwise.
+func apnsPriority(urgency string) string {
+	if urgency == PushUrgencyHigh {
+		return "10"
+	}
+	return "5"
+}
+
+// apnsReason decodes the error reason APNs returns on a non-200 response; a
+// missing or malformed body yields "".
+func apnsReason(r io.Reader) string {
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	_ = json.NewDecoder(io.LimitReader(r, 4<<10)).Decode(&body)
+	return body.Reason
+}
+
+// MountAPNS mounts device-token registration on the daemon's auth-guarded
+// mux, mirroring MountPush.
+func MountAPNS(mux *http.ServeMux, sender *APNSSender) {
+	mux.HandleFunc("POST /api/push/device-tokens", func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxDeviceRegistrationBytes)
+		var reg deviceRegistration
+		if err := json.NewDecoder(r.Body).Decode(&reg); err != nil {
+			var maxErr *http.MaxBytesError
+			if errors.As(err, &maxErr) {
+				http.Error(w, fmt.Sprintf("registration exceeds %d bytes", maxDeviceRegistrationBytes), http.StatusRequestEntityTooLarge)
+				return
+			}
+			http.Error(w, "bad registration: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := validateDeviceRegistration(reg); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := sender.Register(r.Context(), reg.Token, reg.Platform); err != nil {
+			if errors.Is(err, ErrDeviceTokenLimit) {
+				http.Error(w, err.Error(), http.StatusTooManyRequests)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]bool{"ok": true})
+	})
+}
+
+// validateDeviceRegistration rejects a frame the sender could never deliver
+// to: the platform must be ios, and the token must be even-length lowercase
+// hex within the length bounds.
+func validateDeviceRegistration(reg deviceRegistration) error {
+	if reg.Platform != devicePlatform {
+		return fmt.Errorf("device platform must be %q", devicePlatform)
+	}
+	if len(reg.Token) < minDeviceTokenChars || len(reg.Token) > maxDeviceTokenChars {
+		return fmt.Errorf("device token must be %d-%d hex characters", minDeviceTokenChars, maxDeviceTokenChars)
+	}
+	if len(reg.Token)%2 != 0 {
+		return errors.New("device token must be an even number of hex characters")
+	}
+	for _, c := range []byte(reg.Token) {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return errors.New("device token must be lowercase hex")
+		}
+	}
+	return nil
+}
