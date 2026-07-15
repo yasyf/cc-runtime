@@ -34,6 +34,7 @@ func Root() *cobra.Command {
 		AnswerCmd(d),
 		startCmd(d),
 		pairCmd(d),
+		apnsCmd(d),
 		WrapCmd(),
 		tui.TUICmd(d),
 	)
