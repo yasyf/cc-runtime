@@ -6,9 +6,11 @@ the daemon. Over the LAN it pins the daemon's self-signed HTTPS certificate; ove
 the tailnet it validates a real one. Push arrives directly via APNs, with no relay
 in the path.
 
-This directory holds the app foundations: the Xcode project, the app target, and the
-network and model layer as a local Swift package. The screens land in a later stage,
-so today this is the compiling skeleton plus a fully tested client kit.
+This directory holds the SwiftUI app and its client kit. Pair a daemon, browse its
+sessions grouped awaiting-first, answer a question with its full context, and read a
+per-machine notification feed built live from the event streams. The app registers
+this device for APNs on connect and deep-links a tapped push to the question that
+fired it.
 
 ## Layout
 
@@ -16,12 +18,14 @@ so today this is the compiling skeleton plus a fully tested client kit.
 iOS/
 ├── CcRuntime.xcodeproj/     # Synced-folder project — files land in the target by living in the folder
 ├── CcRuntime/               # App target (module CcRuntimeApp)
-│   ├── CcRuntimeApp.swift   #   @main entry point
-│   ├── ContentView.swift    #   placeholder root view
+│   ├── CcRuntimeApp.swift   #   @main entry point; roots MachinesView, shares the PushCenter
+│   ├── Screens/             #   Machines, pairing (scan/paste/Bonjour), sessions, question detail, feed
+│   ├── Support/             #   Connection, registry, view models, formatting, the stream hub
+│   ├── Push/                #   AppDelegate + PushCenter — APNs registration and deep-link routing
 │   ├── Info.plist           #   Bonjour _cc-runtime._tcp, local-network + camera usage
 │   ├── CcRuntime.entitlements  # aps-environment for APNs
 │   └── Assets.xcassets/
-├── CcRuntimeTests/          # App-target smoke test
+├── CcRuntimeTests/          # App-target unit tests (view models, parsing, ordering)
 └── CcRuntimeKit/            # Local SwiftPM package — the network/model layer
     ├── Sources/CcRuntimeKit/
     └── Tests/CcRuntimeKitTests/
@@ -55,6 +59,30 @@ The client kit, unit-tested end to end:
   `answer`.
 - `DeviceTokenRegistrar` POSTs the hex APNs token to `/api/push/device-tokens`.
 
+## Screens
+
+The app is one navigation stack rooted at the machine roster. Its view models live
+in `Support/` behind narrow network protocols, so the ordering, grouping, answer, and
+feed logic runs in the unit tests without a socket.
+
+- The machine roster lists paired daemons with a reachability dot the `EndpointProber`
+  resolves. Add one by scanning its QR, pasting the payload `cc-runtime pair` prints,
+  or picking it off the Bonjour browser; swipe to forget, which drops the roster entry
+  and the Keychain token together.
+- The session list resolves the machine's reachable leg and groups its subjects
+  awaiting-first. It polls the roster and streams every active subject, so the list and
+  the notification feed stay live.
+- Question detail renders a question's header, prompt, reasoning, and diff, with its
+  options as single- or multi-select buttons alongside free-text and notes. Submitting
+  drops the question optimistically and shows the idled banner once the subject
+  releases its gate.
+- The notification feed is built live from the subject streams and from arriving
+  pushes; the `caught-up` marker gates each replay so history never doubles, and any
+  entry dismisses or clears locally.
+- On connect the app registers this device for push. It requests notification
+  authorization, registers for remote notifications, and posts the hex token to the
+  daemon, then deep-links a tapped alert to the subject it names.
+
 ## Build and test
 
 Run the kit's tests on macOS, no simulator required:
@@ -63,11 +91,12 @@ Run the kit's tests on macOS, no simulator required:
 cd iOS/CcRuntimeKit && swift test
 ```
 
-Build the app for the simulator, naming one that `xcrun simctl list devices` shows:
+Build and test the app for the simulator, naming one that `xcrun simctl list devices`
+shows:
 
 ```sh
 xcodebuild -project iOS/CcRuntime.xcodeproj -scheme CcRuntime \
-  -destination 'platform=iOS Simulator,name=iPhone 17' build
+  -destination 'platform=iOS Simulator,name=iPhone 17' build test
 ```
 
 Formatting is SwiftFormat (`.swiftformat`); SwiftLint (`.swiftlint.yml`) owns the
