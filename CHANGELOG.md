@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Direct APNs delivery. `cc-runtime apns set --key <path>.p8 --key-id X
+  --team-id Y --bundle-id Z` enables the lane, `--sandbox` targets Apple's
+  sandbox environment, and `apns off` disables it. The daemon authenticates
+  to APNs over HTTP/2 with an ES256 provider token minted from the auth key
+  and refreshed before Apple's acceptance window closes. iOS clients
+  register device tokens via `POST /api/push/device-tokens`, persisted as
+  `push.device_register` events and deduped by token. Every question and
+  notification fans out to registered devices alongside Web Push, and a
+  device APNs reports unregistered with a 410 or a 400 `BadDeviceToken` is
+  pruned behind a durable unregister event.
 - The interaction ops now ride the daemon's auth-guarded HTTP plane:
   `GET /api/sessions` lists active subjects across scopes with open-question
   counts, `GET /api/subjects/{id}/pending` returns open questions with full
@@ -36,6 +46,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Subscription registration is bounded. The body caps at 8 KiB, endpoint and
   key lengths are limited, and the stored set caps at 32 subscriptions;
   re-registering a stored endpoint always passes.
+- Device-token registration is bounded the same way. The body caps at 1 KiB,
+  tokens must be even-length lowercase hex of 64 to 200 characters, and the
+  stored set caps at 32 tokens. An APNs request carries only the ES256
+  provider token; the pair bearer token never rides a push.
 - Rotating the pair token or turning remote access off (`pair --off`) now
   revokes every stored Web Push subscription behind durable unsubscribe
   events, so a leaked bearer cannot buy push delivery forever.
