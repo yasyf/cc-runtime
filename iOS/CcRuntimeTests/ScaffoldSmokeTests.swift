@@ -1,6 +1,7 @@
 @testable import CcRuntimeApp
 import Testing
 
-@Test func appModuleLoads() {
-    _ = ContentView()
+@MainActor
+@Test func appRootConstructs() {
+    _ = MachinesView(registry: InMemoryMachineRegistry(), probe: { _, _ in false })
 }

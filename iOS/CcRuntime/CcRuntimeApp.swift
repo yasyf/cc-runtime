@@ -1,13 +1,16 @@
 import SwiftUI
 
-/// CcRuntimeApp is the app entry point. The screens — the machine roster, the
-/// session list, and the answer surface — land in a later stage; for now the single
-/// scene roots an empty ContentView so the app builds and launches.
+/// CcRuntimeApp is the app entry point. It roots the navigation at MachinesView and
+/// shares the AppDelegate's PushCenter down the tree so the connected machine screen
+/// can register this device's APNs token and route a tapped notification.
 @main
 struct CcRuntimeApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            MachinesView()
+                .environment(appDelegate.push)
         }
     }
 }
