@@ -28,3 +28,9 @@ __pycache__/
 # placeholder so a clean tree compiles with no web toolchain.
 /internal/web/dist/*
 !/internal/web/dist/index.html
+
+# iOS / Swift build artifacts
+.build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
