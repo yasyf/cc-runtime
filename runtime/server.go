@@ -18,7 +18,8 @@ import (
 // buildServer composes the cc-runtime daemon: the interaction ops, the edit
 // gate, the projection schema, the channel presence lifecycle, the access
 // plane (bind, token, Bonjour, tailnet TLS) from persisted access config, and
-// the Web Push surface feeding every question/notification append.
+// the push lanes — Web Push always, direct APNs when configured — feeding
+// every question/notification append.
 func buildServer(ctx context.Context) (*daemon.Server, error) {
 	st := access.Store{Dir: interaction.AppPaths().StateDir()}
 	acfg, err := st.ReadConfig()
@@ -30,6 +31,10 @@ func buildServer(ctx context.Context) (*daemon.Server, error) {
 		return nil, err
 	}
 	vapid, err := st.EnsureVAPID()
+	if err != nil {
+		return nil, err
+	}
+	apnsCfg, err := st.ReadAPNSConfig()
 	if err != nil {
 		return nil, err
 	}
@@ -78,8 +83,17 @@ func buildServer(ctx context.Context) (*daemon.Server, error) {
 		return nil, err
 	}
 	access.MountPush(s.Mux(), sender)
+	senders := []pushSender{sender}
+	if apnsCfg.Enabled() {
+		apns, err := access.NewAPNSSender(apnsCfg, s.DB(), s.Append)
+		if err != nil {
+			return nil, err
+		}
+		access.MountAPNS(s.Mux(), apns)
+		senders = append(senders, apns)
+	}
 	interaction.MountREST(s)
-	interaction.Register(s, pushFanout{sender: sender, background: s.Background})
+	interaction.Register(s, pushFanout{senders: senders, background: s.Background})
 	return s, nil
 }
 
@@ -89,7 +103,10 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	if err := interaction.Migrate(ctx, db); err != nil {
 		return err
 	}
-	return access.PushMigrate(ctx, db)
+	if err := access.PushMigrate(ctx, db); err != nil {
+		return err
+	}
+	return access.APNSMigrate(ctx, db)
 }
 
 func serve(ctx context.Context) error {
