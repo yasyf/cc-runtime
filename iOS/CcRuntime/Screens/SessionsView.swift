@@ -154,6 +154,9 @@ struct SessionsView: View {
             .onChange(of: push.pendingDeepLink) { _, link in
                 routeDeepLink(link)
             }
+            .onChange(of: sessions.subjectIDs) { _, _ in
+                routeDeepLink(push.pendingDeepLink)
+            }
             .onChange(of: push.deviceTokenHex) { _, _ in
                 Task { await registerDeviceToken() }
             }
@@ -268,6 +271,9 @@ struct SessionsView: View {
         try? await registrar.register(hexToken: hex)
     }
 
+    /// routeDeepLink opens the pending subject once the roster holds it. It runs on
+    /// link arrival and again on every roster change, so a link set before the
+    /// roster loads (cold launch, mid-connect) routes as soon as its subject appears.
     private func routeDeepLink(_ link: PushCenter.DeepLink?) {
         guard let link, sessions.subjectIDs.contains(link.subject) else {
             return
