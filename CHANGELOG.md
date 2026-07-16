@@ -26,8 +26,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   daemon over its unix socket and prints the raw reply as one JSON line,
   exiting nonzero on an error reply — how a peer drives another over ssh. The
   op must be on a safe allowlist (`interaction.list`, `interaction.pending`,
-  `interaction.answer`, `interaction.notify`); control ops stay off the
-  remote surface.
+  `interaction.answer`, `interaction.notify`, `mesh.presence`); control ops
+  stay off the remote surface.
+- Presence-routed delivery. When a question or urgency-high notification fires
+  and this machine's console is unattended, the daemon walks the registered
+  peers over ssh (`rpc mesh.presence`) and surfaces the interaction on the
+  first attended peer via `rpc interaction.notify` — an origin-tagged
+  notification the peer's clients see, carrying no bearer token. Answering
+  still happens against the origin over the mesh answer path, so no state
+  forks. The push lanes always fire regardless (phones are
+  location-independent); routing only adds a peer-machine surface. A console
+  is attended when this user owns an unlocked, unmirrored session — read from
+  `ioreg` and `netstat` on macOS, unattended-with-a-reason elsewhere.
+  `cc-runtime mesh route off` persists an opt-out in `mesh.json` without
+  dropping the peers; routing is on by default wherever peers exist.
 - Direct APNs delivery. `cc-runtime apns set --key <path>.p8 --key-id X
   --team-id Y --bundle-id Z` enables the lane, `--sandbox` targets Apple's
   sandbox environment, and `apns off` disables it. The daemon authenticates
