@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- A machine mesh. `cc-runtime host add <user@host>` verifies the peer is
+  reachable over ssh and has `cc-runtime` installed, records it in a
+  flock-guarded `mesh.json`, and — unless `--no-recurse` — shells
+  `cc-runtime host add <self> --no-recurse` on the peer so the registration
+  is mutual. This host's ssh identity is detected from tailscale, or set with
+  `--self`. `host list` shows registered peers with a live reachability and
+  install column probed concurrently, and `host rm` drops a peer.
+- `cc-runtime rpc <op> [--json <params>]` sends one envelope to the local
+  daemon over its unix socket and prints the raw reply as one JSON line,
+  exiting nonzero on an error reply — how a peer drives another over ssh. The
+  op must be on a safe allowlist (`interaction.list`, `interaction.pending`,
+  `interaction.answer`, `interaction.notify`); control ops stay off the
+  remote surface.
 - Direct APNs delivery. `cc-runtime apns set --key <path>.p8 --key-id X
   --team-id Y --bundle-id Z` enables the lane, `--sandbox` targets Apple's
   sandbox environment, and `apns off` disables it. The daemon authenticates
