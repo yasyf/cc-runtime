@@ -186,7 +186,7 @@ func (a *APNSSender) Register(ctx context.Context, token, platform string) error
 // its row deleted behind a durable unregister event — and does not count as
 // a failure; any other non-2xx or transport error does.
 func (a *APNSSender) Fanout(ctx context.Context, payload PushPayload) error {
-	tokens, err := a.tokens(ctx)
+	tokens, err := listDeviceTokens(ctx, a.db)
 	if err != nil {
 		return err
 	}
@@ -245,32 +245,50 @@ func (a *APNSSender) send(ctx context.Context, body []byte, token, bearer, prior
 	}
 	reason := apnsReason(resp.Body)
 	if resp.StatusCode == http.StatusGone || (resp.StatusCode == http.StatusBadRequest && reason == "BadDeviceToken") {
-		return a.prune(ctx, token)
+		return pruneDeviceToken(ctx, a.db, a.append, token)
 	}
 	return fmt.Errorf("apns %s: status %d reason %q", token, resp.StatusCode, reason)
 }
 
-// prune retires an unregistered device token: durable unregister event first,
-// then the projection delete, mirroring the append-then-project write order.
-func (a *APNSSender) prune(ctx context.Context, token string) error {
+// PurgeDeviceTokens retires every stored APNs registration through
+// pruneDeviceToken, so each revocation leaves a durable unregister event. It
+// mirrors PushSender.purgeAll: a device registration is a durable delivery
+// grant, and a revoked access surface or a disabled APNs lane holds none.
+func PurgeDeviceTokens(ctx context.Context, db *sql.DB, append daemon.AppendFunc) error {
+	tokens, err := listDeviceTokens(ctx, db)
+	if err != nil {
+		return err
+	}
+	for _, token := range tokens {
+		if err := pruneDeviceToken(ctx, db, append, token); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// pruneDeviceToken retires an unregistered device token: durable unregister
+// event first, then the projection delete, mirroring the append-then-project
+// write order.
+func pruneDeviceToken(ctx context.Context, db *sql.DB, append daemon.AppendFunc, token string) error {
 	frame, err := json.Marshal(apnsEventFrame{Type: EventPushDeviceUnregister, Token: token})
 	if err != nil {
 		return err
 	}
-	if _, err := a.append(ctx, &event.Event{
+	if _, err := append(ctx, &event.Event{
 		SubjectID: PushSubjectID, Origin: event.OriginSystem, Type: EventPushDeviceUnregister, Payload: frame,
 	}); err != nil {
 		return fmt.Errorf("append device unregister %s: %w", token, err)
 	}
-	if _, err := a.db.ExecContext(ctx, `DELETE FROM apns_device_tokens WHERE token=?`, token); err != nil {
+	if _, err := db.ExecContext(ctx, `DELETE FROM apns_device_tokens WHERE token=?`, token); err != nil {
 		return fmt.Errorf("prune device token %s: %w", token, err)
 	}
 	return nil
 }
 
-// tokens loads the projected device-token set, token-ordered.
-func (a *APNSSender) tokens(ctx context.Context) ([]string, error) {
-	rows, err := a.db.QueryContext(ctx, `SELECT token FROM apns_device_tokens ORDER BY token`)
+// listDeviceTokens loads the projected device-token set, token-ordered.
+func listDeviceTokens(ctx context.Context, db *sql.DB) ([]string, error) {
+	rows, err := db.QueryContext(ctx, `SELECT token FROM apns_device_tokens ORDER BY token`)
 	if err != nil {
 		return nil, fmt.Errorf("list device tokens: %w", err)
 	}

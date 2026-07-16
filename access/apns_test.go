@@ -432,6 +432,38 @@ func TestAPNSFanoutSurfacesOtherFailuresWithoutPruning(t *testing.T) {
 	}
 }
 
+func TestPurgeDeviceTokensRetiresEveryRegistration(t *testing.T) {
+	f := newAPNSFixture(t)
+	f.register(deviceToken(0))
+	f.register(deviceToken(1))
+
+	if err := PurgeDeviceTokens(context.Background(), f.store.DB(), f.store.AppendEvent); err != nil {
+		t.Fatalf("PurgeDeviceTokens: %v", err)
+	}
+
+	if got := f.tokens(); len(got) != 0 {
+		t.Fatalf("tokens after purge = %v, want none", got)
+	}
+	var unregistered []string
+	for _, ev := range f.events() {
+		if ev.Type == EventPushDeviceUnregister {
+			unregistered = append(unregistered, ev.Token)
+		}
+	}
+	if len(unregistered) != 2 || unregistered[0] != deviceToken(0) || unregistered[1] != deviceToken(1) {
+		t.Fatalf("unregister events = %v, want [%s %s]", unregistered, deviceToken(0), deviceToken(1))
+	}
+
+	// An empty registry purges to a no-op: no further events.
+	before := len(f.events())
+	if err := PurgeDeviceTokens(context.Background(), f.store.DB(), f.store.AppendEvent); err != nil {
+		t.Fatalf("PurgeDeviceTokens (empty): %v", err)
+	}
+	if got := len(f.events()); got != before {
+		t.Fatalf("events after empty purge = %d, want %d", got, before)
+	}
+}
+
 func TestAPNSFanoutWithoutDevicesIsANoOp(t *testing.T) {
 	f := newAPNSFixture(t)
 	if err := f.sender.Fanout(context.Background(), PushPayload{Type: "interaction.notification", Subject: "s1", Body: "hi"}); err != nil {

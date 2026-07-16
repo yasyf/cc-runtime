@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	webpush "github.com/SherClockHolmes/webpush-go"
 	"github.com/yasyf/cc-interact/store"
@@ -65,7 +67,12 @@ type pushFixture struct {
 
 func newPushFixture(t *testing.T) *pushFixture {
 	t.Helper()
-	st, err := store.Open(filepath.Join(t.TempDir(), "state.db"), PushMigrate)
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.db"), func(ctx context.Context, db *sql.DB) error {
+		if err := PushMigrate(ctx, db); err != nil {
+			return err
+		}
+		return APNSMigrate(ctx, db)
+	})
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
@@ -114,6 +121,37 @@ func (f *pushFixture) endpoints() []string {
 			f.t.Fatalf("scan endpoint: %v", err)
 		}
 		out = append(out, ep)
+	}
+	if err := rows.Err(); err != nil {
+		f.t.Fatalf("rows: %v", err)
+	}
+	return out
+}
+
+// registerDevice seeds an APNs registration on the same store, so reconcile
+// tests cover both grant kinds.
+func (f *pushFixture) registerDevice(token string) {
+	f.t.Helper()
+	apns := &APNSSender{db: f.store.DB(), append: f.store.AppendEvent, now: time.Now}
+	if err := apns.Register(context.Background(), token, "ios"); err != nil {
+		f.t.Fatalf("Register device token: %v", err)
+	}
+}
+
+func (f *pushFixture) deviceTokens() []string {
+	f.t.Helper()
+	rows, err := f.store.DB().Query(`SELECT token FROM apns_device_tokens ORDER BY token`)
+	if err != nil {
+		f.t.Fatalf("query apns_device_tokens: %v", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var token string
+		if err := rows.Scan(&token); err != nil {
+			f.t.Fatalf("scan token: %v", err)
+		}
+		out = append(out, token)
 	}
 	if err := rows.Err(); err != nil {
 		f.t.Fatalf("rows: %v", err)
@@ -304,6 +342,7 @@ func TestReconcileGrantsRevokesOnSurfaceChange(t *testing.T) {
 			}
 			sub := testSubscription(t, "https://push.example/reg/1")
 			f.subscribe(sub)
+			f.registerDevice(deviceToken(0))
 
 			if err := f.sender.ReconcileGrants(ctx, tt.nextToken, tt.nextBind); err != nil {
 				t.Fatalf("ReconcileGrants (next boot): %v", err)
@@ -314,15 +353,24 @@ func TestReconcileGrantsRevokesOnSurfaceChange(t *testing.T) {
 				if len(got) != 0 {
 					t.Fatalf("stored subscriptions = %v, want purged", got)
 				}
+				if devices := f.deviceTokens(); len(devices) != 0 {
+					t.Fatalf("stored device tokens = %v, want purged", devices)
+				}
 				events := f.events()
-				last := events[len(events)-1]
-				if last.Type != EventPushUnsubscribe || last.Endpoint != sub.Endpoint {
-					t.Fatalf("last event = %+v, want %s for %s", last, EventPushUnsubscribe, sub.Endpoint)
+				unsub, unreg := events[len(events)-2], events[len(events)-1]
+				if unsub.Type != EventPushUnsubscribe || unsub.Endpoint != sub.Endpoint {
+					t.Fatalf("event = %+v, want %s for %s", unsub, EventPushUnsubscribe, sub.Endpoint)
+				}
+				if unreg.Type != EventPushDeviceUnregister {
+					t.Fatalf("last event = %+v, want %s", unreg, EventPushDeviceUnregister)
 				}
 				return
 			}
 			if len(got) != 1 || got[0] != sub.Endpoint {
 				t.Fatalf("stored subscriptions = %v, want [%s]", got, sub.Endpoint)
+			}
+			if devices := f.deviceTokens(); len(devices) != 1 || devices[0] != deviceToken(0) {
+				t.Fatalf("stored device tokens = %v, want [%s]", devices, deviceToken(0))
 			}
 		})
 	}

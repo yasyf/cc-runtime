@@ -84,6 +84,8 @@ func buildServer(ctx context.Context) (*daemon.Server, error) {
 	}
 	access.MountPush(s.Mux(), sender)
 	senders := []pushSender{sender}
+	// A disabled APNs lane holds no delivery grants: purging on boot keeps
+	// `apns off` from resurrecting old registrations when re-enabled.
 	if apnsCfg.Enabled() {
 		apns, err := access.NewAPNSSender(apnsCfg, s.DB(), s.Append)
 		if err != nil {
@@ -91,6 +93,8 @@ func buildServer(ctx context.Context) (*daemon.Server, error) {
 		}
 		access.MountAPNS(s.Mux(), apns)
 		senders = append(senders, apns)
+	} else if err := access.PurgeDeviceTokens(ctx, s.DB(), s.Append); err != nil {
+		return nil, err
 	}
 	interaction.MountREST(s)
 	interaction.Register(s, pushFanout{senders: senders, background: s.Background})

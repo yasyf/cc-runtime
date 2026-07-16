@@ -215,11 +215,12 @@ func (p *PushSender) send(ctx context.Context, msg []byte, sub webpush.Subscript
 	return nil
 }
 
-// ReconcileGrants runs at boot: it revokes every stored subscription when the
-// access surface they were minted under is gone — a rotated bearer token, or
-// remote access turned off (a non-loopback bind flipping to loopback) — then
-// records the current surface. A subscription is a durable delivery grant;
-// revoking the surface must revoke the grants.
+// ReconcileGrants runs at boot: it revokes every stored push grant — Web Push
+// subscription and APNs device registration alike — when the access surface
+// they were minted under is gone — a rotated bearer token, or remote access
+// turned off (a non-loopback bind flipping to loopback) — then records the
+// current surface. A registration is a durable delivery grant; revoking the
+// surface must revoke the grants.
 func (p *PushSender) ReconcileGrants(ctx context.Context, token, bind string) error {
 	sum := sha256.Sum256([]byte(token))
 	hash := hex.EncodeToString(sum[:])
@@ -232,6 +233,9 @@ func (p *PushSender) ReconcileGrants(ctx context.Context, token, bind string) er
 	}
 	if known && (storedHash != hash || (!IsLoopbackBind(storedBind) && IsLoopbackBind(bind))) {
 		if err := p.purgeAll(ctx); err != nil {
+			return err
+		}
+		if err := PurgeDeviceTokens(ctx, p.db, p.append); err != nil {
 			return err
 		}
 	}
