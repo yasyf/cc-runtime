@@ -152,7 +152,8 @@ func NewAPNSSender(cfg APNSConfig, db *sql.DB, append daemon.AppendFunc) (*APNSS
 // by token), then project the row — append-first, like every interaction
 // write. A registration that would grow the stored set beyond maxDeviceTokens
 // is refused (ErrDeviceTokenLimit); re-registering a stored token always
-// passes.
+// passes and refreshes created_at, so a delayed invalidation can be ordered
+// against it.
 func (a *APNSSender) Register(ctx context.Context, token, platform string) error {
 	var others int
 	if err := a.db.QueryRowContext(ctx,
@@ -174,8 +175,8 @@ func (a *APNSSender) Register(ctx context.Context, token, platform string) error
 	}
 	if _, err := a.db.ExecContext(ctx,
 		`INSERT INTO apns_device_tokens(token, platform, created_at) VALUES(?,?,?)
-		 ON CONFLICT(token) DO UPDATE SET platform=excluded.platform`,
-		token, platform, time.Now().UnixMilli()); err != nil {
+		 ON CONFLICT(token) DO UPDATE SET platform=excluded.platform, created_at=excluded.created_at`,
+		token, platform, a.now().UnixMilli()); err != nil {
 		return fmt.Errorf("project device token: %w", err)
 	}
 	return nil
@@ -243,11 +244,33 @@ func (a *APNSSender) send(ctx context.Context, body []byte, token, bearer, prior
 	if resp.StatusCode == http.StatusOK {
 		return nil
 	}
-	reason := apnsReason(resp.Body)
+	reason, invalidatedAt := apnsFailure(resp.Body)
 	if resp.StatusCode == http.StatusGone || (resp.StatusCode == http.StatusBadRequest && reason == "BadDeviceToken") {
-		return pruneDeviceToken(ctx, a.db, a.append, token)
+		return a.pruneInvalidated(ctx, token, invalidatedAt)
 	}
 	return fmt.Errorf("apns %s: status %d reason %q", token, resp.StatusCode, reason)
+}
+
+// pruneInvalidated retires token unless it was re-registered after APNs
+// invalidated it: a 410's invalidation timestamp (ms) older than the row's
+// created_at marks the response as stale against a fresh grant, so it is
+// dropped. Without a timestamp (400 BadDeviceToken) the token always prunes.
+func (a *APNSSender) pruneInvalidated(ctx context.Context, token string, invalidatedAt int64) error {
+	if invalidatedAt > 0 {
+		var createdAt int64
+		err := a.db.QueryRowContext(ctx,
+			`SELECT created_at FROM apns_device_tokens WHERE token=?`, token).Scan(&createdAt)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("read device token %s: %w", token, err)
+		}
+		if createdAt > invalidatedAt {
+			return nil
+		}
+	}
+	return pruneDeviceToken(ctx, a.db, a.append, token)
 }
 
 // PurgeDeviceTokens retires every stored APNs registration through
@@ -313,14 +336,16 @@ func apnsPriority(urgency string) string {
 	return "5"
 }
 
-// apnsReason decodes the error reason APNs returns on a non-200 response; a
-// missing or malformed body yields "".
-func apnsReason(r io.Reader) string {
+// apnsFailure decodes the error reason and, on a 410, the invalidation
+// timestamp (ms since epoch) APNs returns on a non-200 response; a missing or
+// malformed body yields zero values.
+func apnsFailure(r io.Reader) (reason string, timestamp int64) {
 	var body struct {
-		Reason string `json:"reason"`
+		Reason    string `json:"reason"`
+		Timestamp int64  `json:"timestamp"`
 	}
 	_ = json.NewDecoder(io.LimitReader(r, 4<<10)).Decode(&body)
-	return body.Reason
+	return body.Reason, body.Timestamp
 }
 
 // MountAPNS mounts device-token registration on the daemon's auth-guarded

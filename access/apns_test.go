@@ -28,12 +28,14 @@ type recordedAPNSPush struct {
 }
 
 // fakeAPNSClient is the mocked network boundary: it records every outbound
-// APNs request and answers with the status + reason configured per token.
+// APNs request and answers with the status + reason (and, when configured,
+// the 410 invalidation timestamp) configured per token.
 type fakeAPNSClient struct {
-	mu       sync.Mutex
-	status   map[string]int
-	reason   map[string]string
-	requests []recordedAPNSPush
+	mu        sync.Mutex
+	status    map[string]int
+	reason    map[string]string
+	timestamp map[string]int64
+	requests  []recordedAPNSPush
 }
 
 func (f *fakeAPNSClient) Do(req *http.Request) (*http.Response, error) {
@@ -51,7 +53,11 @@ func (f *fakeAPNSClient) Do(req *http.Request) (*http.Response, error) {
 	f.requests = append(f.requests, recordedAPNSPush{url: req.URL.String(), header: req.Header.Clone(), body: body})
 	var respBody []byte
 	if reason := f.reason[token]; reason != "" {
-		respBody = fmt.Appendf(nil, `{"reason":%q}`, reason)
+		if ts := f.timestamp[token]; ts != 0 {
+			respBody = fmt.Appendf(nil, `{"reason":%q,"timestamp":%d}`, reason, ts)
+		} else {
+			respBody = fmt.Appendf(nil, `{"reason":%q}`, reason)
+		}
 	}
 	return &http.Response{StatusCode: code, Body: io.NopCloser(bytes.NewReader(respBody))}, nil
 }
@@ -89,7 +95,7 @@ func newAPNSFixture(t *testing.T) *apnsFixture {
 	if err != nil {
 		t.Fatalf("LoadAPNSKey: %v", err)
 	}
-	client := &fakeAPNSClient{status: map[string]int{}, reason: map[string]string{}}
+	client := &fakeAPNSClient{status: map[string]int{}, reason: map[string]string{}, timestamp: map[string]int64{}}
 	f := &apnsFixture{t: t, store: st, client: client, pubKey: &key.PublicKey, now: time.Unix(1_752_000_000, 0)}
 	f.sender = &APNSSender{
 		auth:   &apnsAuth{key: loaded, keyID: "KEY123", teamID: "TEAM99"},
@@ -400,6 +406,60 @@ func TestAPNSFanoutPrunesUnregisteredDevices(t *testing.T) {
 				t.Fatalf("second fanout hit %+v, want only %s", after, healthy)
 			}
 		})
+	}
+}
+
+// TestAPNSDelayed410KeepsAFreshlyReRegisteredToken covers the stale-response
+// race: a re-registration refreshes created_at, so an in-flight 410 whose
+// invalidation timestamp predates it must not delete the fresh grant.
+func TestAPNSDelayed410KeepsAFreshlyReRegisteredToken(t *testing.T) {
+	f := newAPNSFixture(t)
+	token := deviceToken(0)
+	f.client.status[token] = http.StatusGone
+	f.client.reason[token] = "Unregistered"
+	f.register(token)
+	invalidatedAt := f.now.UnixMilli()
+
+	f.now = f.now.Add(time.Hour)
+	f.register(token)
+	f.client.timestamp[token] = invalidatedAt
+
+	if err := f.sender.Fanout(context.Background(), PushPayload{Type: "interaction.notification", Subject: "s1", Body: "hi"}); err != nil {
+		t.Fatalf("Fanout: %v (a stale 410 is dropped, not a failure)", err)
+	}
+	if got := f.tokens(); len(got) != 1 || got[0] != token {
+		t.Fatalf("tokens after stale 410 = %v, want [%s] kept", got, token)
+	}
+	for _, ev := range f.events() {
+		if ev.Type == EventPushDeviceUnregister {
+			t.Fatalf("a stale 410 appended an unregister event: %+v", ev)
+		}
+	}
+
+	// An invalidation at or after the registration still prunes.
+	f.client.timestamp[token] = f.now.UnixMilli()
+	if err := f.sender.Fanout(context.Background(), PushPayload{Type: "interaction.notification", Subject: "s1", Body: "hi"}); err != nil {
+		t.Fatalf("Fanout: %v", err)
+	}
+	if got := f.tokens(); len(got) != 0 {
+		t.Fatalf("tokens after current 410 = %v, want pruned", got)
+	}
+}
+
+func TestReRegisterRefreshesCreatedAt(t *testing.T) {
+	f := newAPNSFixture(t)
+	token := deviceToken(0)
+	f.register(token)
+
+	f.now = f.now.Add(time.Hour)
+	f.register(token)
+
+	var createdAt int64
+	if err := f.store.DB().QueryRow(`SELECT created_at FROM apns_device_tokens WHERE token=?`, token).Scan(&createdAt); err != nil {
+		t.Fatalf("read created_at: %v", err)
+	}
+	if createdAt != f.now.UnixMilli() {
+		t.Fatalf("created_at = %d, want refreshed to %d", createdAt, f.now.UnixMilli())
 	}
 }
 
