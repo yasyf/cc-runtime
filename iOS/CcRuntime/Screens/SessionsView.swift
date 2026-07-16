@@ -125,6 +125,7 @@ struct SessionsView: View {
     @State private var connectAttempt = 0
     @State private var showingFeed = false
     @State private var deepLinkSubject: String?
+    @State private var registeredTokenHex: String?
 
     init(machine: Machine) {
         self.machine = machine
@@ -250,25 +251,34 @@ struct SessionsView: View {
     }
 
     /// pollRoster refreshes the roster on an interval so the list stays live even when
-    /// no subject is open, mirroring the web client's polling cadence.
+    /// no subject is open, mirroring the web client's polling cadence. Each tick also
+    /// retries a device-token registration that hasn't landed yet.
     private func pollRoster() async {
         while !Task.isCancelled {
             await sessions.refresh()
+            await registerDeviceToken()
             try? await Task.sleep(for: .seconds(4))
         }
     }
 
     /// registerDeviceToken posts this device's APNs token to the connected machine.
-    /// The token arrives asynchronously, so this runs both after authorization and
-    /// again when the token lands.
+    /// The token arrives asynchronously, so this runs after authorization, when the
+    /// token lands, and on every roster poll tick until the post succeeds — one
+    /// transient failure must not silently disable push for the session.
     private func registerDeviceToken() async {
         guard connection.state == .connected,
               let hex = push.deviceTokenHex,
+              hex != registeredTokenHex,
               let registrar = connection.registrar()
         else {
             return
         }
-        try? await registrar.register(hexToken: hex)
+        do {
+            try await registrar.register(hexToken: hex)
+            registeredTokenHex = hex
+        } catch {
+            // Still unregistered; the next poll tick retries.
+        }
     }
 
     /// routeDeepLink opens the pending subject once the roster holds it. It runs on
