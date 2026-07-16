@@ -11,6 +11,7 @@ import (
 	"github.com/yasyf/cc-interact/daemon"
 
 	"github.com/yasyf/cc-runtime/interaction"
+	"github.com/yasyf/cc-runtime/mesh"
 )
 
 // liveEvent is one frame off the subject's event stream, fed into the Update
@@ -45,11 +46,26 @@ type clearWaitNoteMsg struct{}
 // one awaiting subject, which pickAwaiting cannot disambiguate on its own.
 const multiAwaitingNote = "multiple awaiting subjects in this scope — answer via `cc-runtime answer` or close other windows"
 
-// submittedMsg reports the outcome of an OpAnswer round-trip for the given
-// question; Err is non-nil when the submit failed.
+// submittedMsg reports the outcome of an answer round-trip for the given
+// question; Err is non-nil when the submit failed. Idled reports whether the
+// answer released the subject's gate — set only on the remote path, where
+// AnswerRemote returns it, so the View can show the remote release.
 type submittedMsg struct {
 	QuestionID int64
+	Idled      bool
 	Err        error
+}
+
+// meshResolvedMsg carries one mesh-wide resolve poll: the merged per-machine
+// roster ListAll returned plus the single-awaiting decision pickMeshAwaiting made
+// over it. It is the mesh analog of the local resolve path's resolved /
+// multiAwaiting / clearWaitNote messages, folded into one so the roster and the
+// decision arrive together.
+type meshResolvedMsg struct {
+	roster   []mesh.HostSubjects
+	res      resolution
+	found    bool
+	multiple bool
 }
 
 // reseededMsg carries the subject's still-open questions read from the daemon's
@@ -86,8 +102,23 @@ type Model struct {
 	// code; nil in tests, which drive the events channel directly.
 	startStream func(resolution)
 
+	// reg, local, and dial are the mesh wiring: non-nil only when the registry has
+	// peers. When nil the model runs the untouched local-only path (OpList over the
+	// socket). When set, the resolve poll fans interaction.list across the mesh via
+	// ListAll and a remote-resolved subject is answered over ssh via AnswerRemote.
+	reg   *mesh.Registry
+	local mesh.Runner
+	dial  func(target string) mesh.Runner
+
+	// roster is the last merged per-machine ListAll result, shown as the mesh
+	// awaiting list while unresolved. Empty on the local-only path.
+	roster []mesh.HostSubjects
+
 	res      resolution
 	resolved bool
+	// idled records whether the last remote answer released the subject's gate, so
+	// the done view can show the remote release.
+	idled bool
 
 	questions []question
 	focus     int
@@ -184,6 +215,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.waitNote = ""
 		return m, nil
 
+	case meshResolvedMsg:
+		// Store the roster, then reuse the local resolved/multi/clear handlers.
+		m.roster = msg.roster
+		switch {
+		case msg.found:
+			return m.Update(resolvedMsg{Res: msg.res})
+		case msg.multiple:
+			return m.Update(multiAwaitingMsg{})
+		default:
+			return m.Update(clearWaitNoteMsg{})
+		}
+
 	case resolvedMsg:
 		m.err = nil
 		m.waitNote = ""
@@ -219,6 +262,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.err = nil
+		m.idled = msg.Idled
 		m.answered[msg.QuestionID] = true
 		m.advance()
 		return m, nil
@@ -369,12 +413,41 @@ func (m Model) submit() (interaction.AnswerPayload, bool) {
 	}, true
 }
 
-// submitCmd builds the payload and submits it over the socket, reporting the
-// outcome back into Update as a submittedMsg.
+// meshEnabled reports whether the registry has peers, gating every mesh path. It
+// is false on the local-only path, which then runs unchanged.
+func (m Model) meshEnabled() bool { return m.reg != nil }
+
+// remoteResolved reports whether the resolved subject lives on a peer, so the
+// answer, reseed, and stream paths route over ssh instead of the local socket.
+func (m Model) remoteResolved() bool { return m.meshEnabled() && !m.res.Local }
+
+// machineLabel is the resolved subject's machine label for display.
+func (m Model) machineLabel() string {
+	if m.res.Local {
+		return "local"
+	}
+	return mesh.HostNode(m.res.Host)
+}
+
+// submitCmd builds the payload and submits it, reporting the outcome back into
+// Update as a submittedMsg. A local subject answers over the socket; a remote one
+// routes through AnswerRemote over ssh, carrying back whether the answer released
+// the remote gate.
 func (m Model) submitCmd() tea.Cmd {
 	a, ok := m.submit()
 	if !ok {
 		return nil
+	}
+	if m.remoteResolved() {
+		host := m.res.Host
+		runner := m.dial(host)
+		return func() tea.Msg {
+			idled, err := mesh.AnswerRemote(context.Background(), runner, host, a)
+			if err != nil {
+				return submittedMsg{QuestionID: a.QuestionID, Err: err}
+			}
+			return submittedMsg{QuestionID: a.QuestionID, Idled: idled}
+		}
 	}
 	scope := m.scope
 	client := m.client
@@ -394,6 +467,9 @@ func (m Model) submitCmd() tea.Cmd {
 // the socket briefly unreachable — so it is swallowed to keep polling rather than
 // latched into a fatal error screen.
 func (m Model) resolveCmd() tea.Cmd {
+	if m.meshEnabled() {
+		return m.meshResolveCmd()
+	}
 	scope := m.scope
 	client := m.client
 	return func() tea.Msg {
@@ -414,6 +490,26 @@ func (m Model) resolveCmd() tea.Cmd {
 	}
 }
 
+// meshResolveCmd runs one mesh-wide resolve poll: ListAll fans interaction.list
+// across every machine, and pickMeshAwaiting resolves the single awaiting subject
+// over the merged roster. A malformed reply from a live peer fails loud into an
+// errMsg; an unreachable peer is folded into the roster and never latches an
+// error, matching the local path's tolerance of a transient daemon.
+func (m Model) meshResolveCmd() tea.Cmd {
+	reg := m.reg
+	scope := m.scope
+	local := m.local
+	dial := m.dial
+	return func() tea.Msg {
+		results, err := mesh.ListAll(context.Background(), reg, scope, local, dial)
+		if err != nil {
+			return errMsg{Err: err}
+		}
+		res, found, multiple := pickMeshAwaiting(results)
+		return meshResolvedMsg{roster: results, res: res, found: found, multiple: multiple}
+	}
+}
+
 // reseedCmd reads the resolved subject's still-open questions from the daemon's
 // OpPending projection and folds them in as a reseededMsg. It runs at resolve
 // time so a relaunch — where the resumed stream cursor has already advanced past
@@ -421,11 +517,35 @@ func (m Model) resolveCmd() tea.Cmd {
 // question. A fetch error is non-fatal: the live stream remains the primary
 // source, so a failed reseed yields no questions rather than a fatal error.
 func (m Model) reseedCmd() tea.Cmd {
+	if m.remoteResolved() {
+		return m.remoteReseedCmd()
+	}
 	scope := m.scope
 	client := m.client
 	subjectID := m.res.SubjectID
 	return func() tea.Msg {
 		qs, err := fetchPending(context.Background(), client, scope, subjectID)
+		if err != nil {
+			return reseededMsg{}
+		}
+		return reseededMsg{Questions: qs}
+	}
+}
+
+// remoteReseedCmd reads a remote subject's open questions via PendingAll — the
+// remote path has no SSE stream, so pending is its only question source. A fetch
+// error is non-fatal, matching the local reseed.
+func (m Model) remoteReseedCmd() tea.Cmd {
+	reg := m.reg
+	local := m.local
+	dial := m.dial
+	subjectID := m.res.SubjectID
+	return func() tea.Msg {
+		results, err := mesh.PendingAll(context.Background(), reg, subjectID, local, dial)
+		if err != nil {
+			return reseededMsg{}
+		}
+		qs, err := remoteQuestions(results)
 		if err != nil {
 			return reseededMsg{}
 		}

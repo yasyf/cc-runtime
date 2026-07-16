@@ -17,6 +17,7 @@ import (
 	"github.com/yasyf/cc-interact/daemon"
 
 	"github.com/yasyf/cc-runtime/interaction"
+	"github.com/yasyf/cc-runtime/mesh"
 )
 
 // eventBuffer sizes the channel between the SSE consumer goroutine and the
@@ -53,13 +54,38 @@ func run(ctx context.Context, d cmd.Deps, scope string) error {
 	client := d.NewClient()
 
 	model := NewModel(scope, client, events)
+	// Only a local subject has a reachable events plane; a remote one has no SSE and
+	// is fed by the pending reseed instead.
 	model.startStream = func(res resolution) {
-		go streamInto(ctx, d, scope, res, events)
+		if res.Local {
+			go streamInto(ctx, d, scope, res, events)
+		}
+	}
+	if err := wireMesh(&model, d); err != nil {
+		return err
 	}
 
 	p := tea.NewProgram(model, tea.WithContext(ctx))
 	_, err := p.Run()
 	return err
+}
+
+// wireMesh enables the mesh paths when the registry has peers: the resolve poll
+// then fans interaction.list across every machine and a remote subject is
+// answered over ssh. With no peers the model keeps its untouched local-only path.
+// A corrupt registry fails loud rather than silently dropping the mesh.
+func wireMesh(model *Model, d cmd.Deps) error {
+	reg, err := (mesh.Store{Dir: d.Paths.StateDir()}).Load()
+	if err != nil {
+		return err
+	}
+	if len(reg.Hosts) == 0 {
+		return nil
+	}
+	model.reg = reg
+	model.local = mesh.LocalRunner{}
+	model.dial = func(target string) mesh.Runner { return mesh.SSHRunner{Target: target} }
+	return nil
 }
 
 // streamInto consumes the subject's event log off the daemon's HTTP plane and

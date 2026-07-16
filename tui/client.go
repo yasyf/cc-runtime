@@ -9,6 +9,7 @@ import (
 	"github.com/yasyf/cc-interact/daemon"
 
 	"github.com/yasyf/cc-runtime/interaction"
+	"github.com/yasyf/cc-runtime/mesh"
 )
 
 // tuiConsumer is the stream-consumer name the TUI registers under, keeping its
@@ -22,11 +23,15 @@ type listReply struct {
 	HTTPPort int                         `json:"http_port"`
 }
 
-// resolution is the awaiting subject the TUI attaches to: its id and the events
-// plane port the consumer streams from.
+// resolution is the awaiting subject the TUI attaches to: its id, the events
+// plane port the consumer streams from, and the machine it lives on. Local marks
+// this host's own subject (answered over the socket, streamed over SSE); a remote
+// subject carries its owning ssh target in Host and is answered via AnswerRemote.
 type resolution struct {
 	SubjectID string
 	HTTPPort  int
+	Host      string
+	Local     bool
 }
 
 // resolveAwaiting asks the daemon for the scope's subjects and picks the single
@@ -105,7 +110,48 @@ func pickAwaiting(lr listReply) (res resolution, found, multiple bool) {
 	if awaiting == "" {
 		return resolution{}, false, false
 	}
-	return resolution{SubjectID: awaiting, HTTPPort: lr.HTTPPort}, true, false
+	return resolution{SubjectID: awaiting, HTTPPort: lr.HTTPPort, Local: true}, true, false
+}
+
+// pickMeshAwaiting resolves the single awaiting subject across the merged mesh
+// roster. Like pickAwaiting, more than one awaiting subject anywhere on the mesh
+// is the transient multiple state, not a resolution. The resolution records the
+// owning machine so the answer routes to the socket or over ssh.
+func pickMeshAwaiting(results []mesh.HostSubjects) (res resolution, found, multiple bool) {
+	awaiting := 0
+	for _, h := range results {
+		for _, s := range h.Subjects {
+			if s.Status != interaction.StatusAwaiting {
+				continue
+			}
+			awaiting++
+			res = resolution{SubjectID: s.SubjectID, HTTPPort: h.HTTPPort, Host: h.Host, Local: h.Local}
+		}
+	}
+	switch awaiting {
+	case 1:
+		return res, true, false
+	case 0:
+		return resolution{}, false, false
+	default:
+		return resolution{}, false, true
+	}
+}
+
+// remoteQuestions flattens a PendingAll roster into the model's open-question
+// list. A subject lives on one machine, so at most one host contributes.
+func remoteQuestions(results []mesh.HostPending) ([]question, error) {
+	out := []question{}
+	for _, h := range results {
+		for _, pq := range h.Questions {
+			q, err := parseQuestion(pq.QuestionID, pq.Payload)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, q)
+		}
+	}
+	return out, nil
 }
 
 // listPort re-resolves the daemon's current HTTP events port via OpList,

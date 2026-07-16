@@ -25,6 +25,7 @@ var (
 	doneStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("46"))
 	hintStyle    = lipgloss.NewStyle().Faint(true)
 	waitingStyle = lipgloss.NewStyle().Faint(true)
+	machineStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("111")).Bold(true)
 )
 
 // render assembles the whole frame: header, the focused question (prompt,
@@ -45,18 +46,23 @@ func (m Model) render() string {
 			b.WriteString(waitingStyle.Render("waiting for an awaiting subject…"))
 		}
 		b.WriteString("\n\n")
+		b.WriteString(m.renderRoster())
 		b.WriteString(m.renderFeed())
 		b.WriteString(m.renderHints())
 		return b.String()
 	}
 
 	open := m.openCount()
-	b.WriteString(hintStyle.Render(fmt.Sprintf("%d open · subject %s", open, short(m.res.SubjectID))))
+	if m.meshEnabled() {
+		b.WriteString(hintStyle.Render(fmt.Sprintf("%d open · %s · subject %s", open, m.machineLabel(), short(m.res.SubjectID))))
+	} else {
+		b.WriteString(hintStyle.Render(fmt.Sprintf("%d open · subject %s", open, short(m.res.SubjectID))))
+	}
 	b.WriteString("\n\n")
 
 	q, ok := m.focused()
 	if !ok {
-		b.WriteString(doneStyle.Render("all questions answered"))
+		b.WriteString(doneStyle.Render(m.doneLine()))
 		b.WriteString("\n\n")
 		b.WriteString(m.renderFeed())
 		b.WriteString(m.renderHints())
@@ -116,6 +122,45 @@ func (m Model) renderQuestion(q question) string {
 
 	b.WriteString("\n")
 	b.WriteString(m.notes.View())
+	b.WriteString("\n")
+	return b.String()
+}
+
+// doneLine is the all-answered banner; a remote subject that idled shows the
+// release of its owning machine's gate.
+func (m Model) doneLine() string {
+	if m.remoteResolved() && m.idled {
+		return "answered — released " + m.machineLabel()
+	}
+	return "all questions answered"
+}
+
+// renderRoster draws the mesh awaiting list while unresolved: each machine's
+// subjects prefixed by its node label, unreachable peers marked. Empty (and so
+// invisible) on the local-only path, keeping that render untouched.
+func (m Model) renderRoster() string {
+	if len(m.roster) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(hintStyle.Render("— mesh —"))
+	b.WriteString("\n")
+	for _, h := range m.roster {
+		node := h.Node()
+		if h.Err != nil {
+			b.WriteString(machineStyle.Render(node) + "  " + descStyle.Render("unreachable"))
+			b.WriteString("\n")
+			continue
+		}
+		for _, s := range h.Subjects {
+			row := fmt.Sprintf("%s  %s  %s", machineStyle.Render(node), short(s.SubjectID), s.Status)
+			if s.Pending > 0 {
+				row += fmt.Sprintf("  (%d open)", s.Pending)
+			}
+			b.WriteString(row)
+			b.WriteString("\n")
+		}
+	}
 	b.WriteString("\n")
 	return b.String()
 }
