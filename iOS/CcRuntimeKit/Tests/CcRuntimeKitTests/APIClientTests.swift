@@ -67,9 +67,9 @@ struct APIClientTests {
         let optioned = #"{"options":[{"label":"Only"}],"prompt":"Go?"}"#
         let encodedOptionless = try String(decoding: JSONEncoder().encode(optionless), as: UTF8.self)
         let encodedOptioned = try String(decoding: JSONEncoder().encode(optioned), as: UTF8.self)
-        StubURLProtocol.register(host: host) { _ in
-            .json(200, #"{"questions":[{"question_id":1,"payload":\#(encodedOptionless)},{"question_id":2,"payload":\#(encodedOptioned)}]}"#)
-        }
+        let reply = #"{"questions":[{"question_id":1,"payload":\#(encodedOptionless)},"#
+            + #"{"question_id":2,"payload":\#(encodedOptioned)}]}"#
+        StubURLProtocol.register(host: host) { _ in .json(200, reply) }
 
         let open = try await makeClient(host).openQuestions(subject: "s1")
         #expect(open == [
