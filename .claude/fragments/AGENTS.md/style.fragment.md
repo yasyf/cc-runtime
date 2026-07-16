@@ -33,5 +33,3 @@
 **Testing.** Tests live alongside their packages (Go convention, not a separate `tests/` dir). Run the suite with `go test -race ./...`.
 
 **Writing docs.** When writing or revising docs, a README, a tutorial, a how-to, or reference, use the `writing-docs` skill (Diataxis modes, voice rules, and runnable code-sample rules) and run `slop-cop check <file> --lang=markdown` before you finish.
-
-**Git.** Commits should be atomic and scoped. One logical change per commit.
