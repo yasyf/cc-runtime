@@ -46,6 +46,27 @@ public struct QuestionPayload: Decodable, Equatable, Sendable {
         self.reasoning = reasoning
         self.diff = diff
     }
+
+    /// Go serializes a no-option question's nil slice as `"options": null`, so a
+    /// null or absent array decodes as empty rather than failing the whole batch.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        header = try container.decodeIfPresent(String.self, forKey: .header)
+        multiSelect = try container.decodeIfPresent(Bool.self, forKey: .multiSelect)
+        options = try container.decodeIfPresent([Option].self, forKey: .options) ?? []
+        prompt = try container.decodeIfPresent(String.self, forKey: .prompt)
+        reasoning = try container.decodeIfPresent(String.self, forKey: .reasoning)
+        diff = try container.decodeIfPresent(String.self, forKey: .diff)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case header
+        case multiSelect
+        case options
+        case prompt
+        case reasoning
+        case diff
+    }
 }
 
 /// NotificationPayload is a one-way message carried on an interaction.notification

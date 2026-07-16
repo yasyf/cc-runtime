@@ -58,6 +58,26 @@ struct APIClientTests {
         #expect(open == [OpenQuestion(questionID: 3, question: QuestionPayload(options: [Option(label: "Only")], prompt: "Go?"))])
     }
 
+    @Test("a no-option question (Go's nil slice, serialized as options null) decodes alongside an optioned one")
+    func optionlessQuestionDecodes() async throws {
+        let host = "stub-\(UUID().uuidString).test"
+        defer { StubURLProtocol.unregister(host: host) }
+
+        let optionless = #"{"prompt":"Anything to add?","options":null}"#
+        let optioned = #"{"options":[{"label":"Only"}],"prompt":"Go?"}"#
+        let encodedOptionless = try String(decoding: JSONEncoder().encode(optionless), as: UTF8.self)
+        let encodedOptioned = try String(decoding: JSONEncoder().encode(optioned), as: UTF8.self)
+        StubURLProtocol.register(host: host) { _ in
+            .json(200, #"{"questions":[{"question_id":1,"payload":\#(encodedOptionless)},{"question_id":2,"payload":\#(encodedOptioned)}]}"#)
+        }
+
+        let open = try await makeClient(host).openQuestions(subject: "s1")
+        #expect(open == [
+            OpenQuestion(questionID: 1, question: QuestionPayload(options: [], prompt: "Anything to add?")),
+            OpenQuestion(questionID: 2, question: QuestionPayload(options: [Option(label: "Only")], prompt: "Go?")),
+        ])
+    }
+
     @Test("answer POSTs the body sans subject_id and returns whether the subject idled")
     func answerPostsBody() async throws {
         let host = "stub-\(UUID().uuidString).test"
