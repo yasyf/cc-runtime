@@ -99,7 +99,8 @@ func buildServer(ctx context.Context) (*daemon.Server, error) {
 	}
 	interaction.MountREST(s)
 	s.Register(mesh.OpPresence, mesh.PresenceHandler)
-	interaction.Register(s, pushFanout{senders: senders, background: s.Background})
+	router := mesh.NewRouter(meshStore(), mesh.LocalRunner{}, sshRunner)
+	interaction.Register(s, pushFanout{senders: senders, background: s.Background, router: router})
 	return s, nil
 }
 

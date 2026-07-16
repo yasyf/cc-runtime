@@ -14,10 +14,13 @@ import "strings"
 const Binary = "cc-runtime"
 
 // Registry is the persisted host identity: Self is this machine's ssh target as
-// peers reach it, Hosts are the peers this machine reaches.
+// peers reach it, Hosts are the peers this machine reaches. RouteOff is the
+// escape hatch that disables presence routing while keeping the peers registered;
+// its zero value leaves routing on wherever peers exist.
 type Registry struct {
-	Self  string   `json:"self"`
-	Hosts []string `json:"hosts"`
+	Self     string   `json:"self"`
+	Hosts    []string `json:"hosts"`
+	RouteOff bool     `json:"route_off,omitempty"`
 }
 
 // UpsertHost adds a peer ssh target unless it is already registered.

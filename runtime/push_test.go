@@ -30,6 +30,33 @@ func (r *recordingSender) recorded() []access.PushPayload {
 	return append([]access.PushPayload(nil), r.payloads...)
 }
 
+// routeCall is one interaction the router was asked to surface on a peer.
+type routeCall struct {
+	subjectID string
+	header    string
+}
+
+// recordingRouter records every routing request and returns a scripted outcome.
+type recordingRouter struct {
+	mu     sync.Mutex
+	calls  []routeCall
+	target string
+	err    error
+}
+
+func (r *recordingRouter) Route(_ context.Context, subjectID, header string) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, routeCall{subjectID, header})
+	return r.target, r.err
+}
+
+func (r *recordingRouter) recorded() []routeCall {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]routeCall(nil), r.calls...)
+}
+
 // stuckSender blocks its fan-out until released or its lane context expires,
 // standing in for a hung push endpoint.
 type stuckSender struct {
@@ -68,6 +95,75 @@ func TestPushFanoutMapsAppendsOntoEveryLane(t *testing.T) {
 				t.Fatalf("%s lane payload %d = %+v, want %+v", id, i, got[i], want[i])
 			}
 		}
+	}
+}
+
+// TestPushFanoutRoutesQuestionsAndHighNotifications proves the presence router is
+// invoked for a question and an urgency-high notification but not a normal one,
+// while the push lanes fire for every event regardless of the routing outcome.
+func TestPushFanoutRoutesQuestionsAndHighNotifications(t *testing.T) {
+	web := &recordingSender{}
+	router := &recordingRouter{target: "u@peer"}
+	f := pushFanout{
+		senders:    []pushSender{web},
+		background: func(fn func(context.Context)) { fn(context.Background()) },
+		router:     router,
+	}
+
+	f.Question("s1", interaction.QuestionPayload{Header: "Deploy?", Prompt: "pick one"})
+	f.Notification("s2", interaction.NotificationPayload{Message: "urgent", Urgency: access.PushUrgencyHigh})
+	f.Notification("s3", interaction.NotificationPayload{Message: "fyi", Urgency: "normal"})
+
+	if got := len(web.recorded()); got != 3 {
+		t.Fatalf("push lane fired %d times, want 3 (every event pushes regardless of routing)", got)
+	}
+	want := []routeCall{{"s1", "Deploy?"}, {"s2", "urgent"}}
+	got := router.recorded()
+	if len(got) != len(want) {
+		t.Fatalf("router saw %+v, want %+v (normal notification must not route)", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("route call %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+// TestPushFanoutPushesEvenWhenRouteFails proves a failing route never suppresses
+// the push lanes — presence routing is additive, phones fire regardless.
+func TestPushFanoutPushesEvenWhenRouteFails(t *testing.T) {
+	web := &recordingSender{}
+	router := &recordingRouter{err: context.DeadlineExceeded}
+	f := pushFanout{
+		senders:    []pushSender{web},
+		background: func(fn func(context.Context)) { fn(context.Background()) },
+		router:     router,
+	}
+
+	f.Question("s1", interaction.QuestionPayload{Header: "Deploy?", Prompt: "pick one"})
+
+	if got := len(web.recorded()); got != 1 {
+		t.Fatalf("push lane fired %d times, want 1 despite the route failure", got)
+	}
+	if got := len(router.recorded()); got != 1 {
+		t.Fatalf("router invoked %d times, want 1", got)
+	}
+}
+
+// TestPushFanoutNilRouterSkipsRouting proves the local-only path (no mesh router)
+// still fires the push lanes and never dereferences a nil router.
+func TestPushFanoutNilRouterSkipsRouting(t *testing.T) {
+	web := &recordingSender{}
+	f := pushFanout{
+		senders:    []pushSender{web},
+		background: func(fn func(context.Context)) { fn(context.Background()) },
+	}
+
+	f.Question("s1", interaction.QuestionPayload{Header: "Deploy?"})
+	f.Notification("s2", interaction.NotificationPayload{Message: "hi", Urgency: access.PushUrgencyHigh})
+
+	if got := len(web.recorded()); got != 2 {
+		t.Fatalf("push lane fired %d times, want 2", got)
 	}
 }
 

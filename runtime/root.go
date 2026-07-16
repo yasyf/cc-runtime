@@ -36,6 +36,7 @@ func Root() *cobra.Command {
 		pairCmd(d),
 		apnsCmd(d),
 		hostCmd(),
+		meshCmd(),
 		rpcCmd(d),
 		WrapCmd(),
 		tui.TUICmd(d),
