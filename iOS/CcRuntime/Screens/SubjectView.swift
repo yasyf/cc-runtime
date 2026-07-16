@@ -4,7 +4,9 @@ import SwiftUI
 /// SubjectModel loads one subject's open questions over REST and submits answers.
 /// A submit optimistically drops the answered question; the reply's idled flag tells
 /// the view the subject released its gate once the last question is answered. A
-/// failed submit reconciles by reloading.
+/// failed submit reconciles by reloading. Refreshes and submits interleave across
+/// await boundaries, so a refresh snapshot that crosses a submit is discarded — it
+/// could resurrect the answered question and lose the idled state.
 @MainActor
 @Observable
 final class SubjectModel {
@@ -24,6 +26,7 @@ final class SubjectModel {
 
     private let client: any QuestionsProviding
     private var inFlight: Set<Int64> = []
+    private var generation = 0
 
     init(subject: String, client: any QuestionsProviding) {
         self.subject = subject
@@ -31,16 +34,25 @@ final class SubjectModel {
     }
 
     /// refresh reloads the open questions, holding the prior list visible across the
-    /// reload. A non-empty result clears the idled banner.
+    /// reload. A snapshot fetched across a submit (the generation moved, or one is
+    /// still in flight) is stale and dropped. A non-empty result clears the idled
+    /// banner.
     func refresh() async {
+        let snapshot = generation
         do {
             let fetched = try await client.openQuestions(subject: subject)
+            guard snapshot == generation, inFlight.isEmpty else {
+                return
+            }
             questions = fetched
             if !fetched.isEmpty {
                 idled = false
             }
             phase = .loaded
         } catch {
+            guard snapshot == generation, inFlight.isEmpty else {
+                return
+            }
             phase = .failed(SubjectModel.message(for: error))
         }
     }
@@ -58,20 +70,33 @@ final class SubjectModel {
         guard !inFlight.contains(open.questionID) else {
             return
         }
-        inFlight.insert(open.questionID)
-        defer { inFlight.remove(open.questionID) }
+        beginSubmit(open.questionID)
         submitError = nil
         let remaining = questions.filter { $0.questionID != open.questionID }
         questions = remaining
         do {
             let didIdle = try await client.answer(subject: subject, draft.payload(questionID: open.questionID))
+            endSubmit(open.questionID)
             if remaining.isEmpty {
                 idled = didIdle
             }
         } catch {
+            endSubmit(open.questionID)
             submitError = SubjectModel.message(for: error)
             await refresh()
         }
+    }
+
+    private func beginSubmit(_ questionID: Int64) {
+        inFlight.insert(questionID)
+        generation += 1
+    }
+
+    /// endSubmit closes a submit's bracket; the second generation bump invalidates
+    /// every refresh snapshot taken while the answer was in flight.
+    private func endSubmit(_ questionID: Int64) {
+        inFlight.remove(questionID)
+        generation += 1
     }
 
     private static func message(for error: Error) -> String {

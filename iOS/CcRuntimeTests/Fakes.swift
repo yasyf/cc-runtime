@@ -59,11 +59,15 @@ final class FakeSessions: SessionsProviding, @unchecked Sendable {
 
 /// FakeQuestions is a scripted QuestionsProviding: it serves a mutable open-question
 /// list and records answers, optionally failing the answer post to exercise the
-/// reconcile path.
+/// reconcile path. `holdNextOpen` snapshots the list, then suspends the fetch until
+/// `releaseHeld`, so a test can interleave a stale refresh with a submit.
 final class FakeQuestions: QuestionsProviding, @unchecked Sendable {
     var questions: [OpenQuestion]
     var idled: Bool
     var answerError: Error?
+    var holdNextOpen = false
+    private(set) var holding = false
+    private var held: CheckedContinuation<Void, Never>?
     private(set) var answered: [AnswerPayload] = []
 
     init(questions: [OpenQuestion], idled: Bool = true) {
@@ -72,7 +76,19 @@ final class FakeQuestions: QuestionsProviding, @unchecked Sendable {
     }
 
     func openQuestions(subject _: String) async throws -> [OpenQuestion] {
-        questions
+        let snapshot = questions
+        if holdNextOpen {
+            holdNextOpen = false
+            holding = true
+            await withCheckedContinuation { held = $0 }
+            holding = false
+        }
+        return snapshot
+    }
+
+    func releaseHeld() {
+        held?.resume()
+        held = nil
     }
 
     func answer(subject _: String, _ answer: AnswerPayload) async throws -> Bool {
