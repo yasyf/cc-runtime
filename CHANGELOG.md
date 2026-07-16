@@ -14,6 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is mutual. This host's ssh identity is detected from tailscale, or set with
   `--self`. `host list` shows registered peers with a live reachability and
   install column probed concurrently, and `host rm` drops a peer.
+- Mesh-wide answering in the TUI. When the registry has peers, `cc-runtime
+  tui` fans `interaction.list` across every machine, labels each awaiting
+  subject with the machine it lives on, and resolves the one awaiting subject
+  wherever it is. A subject on a peer has no reachable event stream, so its
+  open questions are read over ssh and the answer routes back through
+  `interaction.answer` on that peer, showing when it releases the remote gate.
+  An unreachable peer is marked unreachable instead of blanking the list; with
+  no peers registered the local-only answer surface is unchanged.
 - `cc-runtime rpc <op> [--json <params>]` sends one envelope to the local
   daemon over its unix socket and prints the raw reply as one JSON line,
   exiting nonzero on an error reply — how a peer drives another over ssh. The
