@@ -91,7 +91,7 @@ func buildServer(ctx context.Context) (*daemon.Server, error) {
 		if err != nil {
 			return nil, err
 		}
-		access.MountAPNS(s.Mux(), apns)
+		access.MountAPNS(s.Mux(), apns, token)
 		senders = append(senders, apns)
 	} else if err := access.PurgeDeviceTokens(ctx, s.DB(), s.Append); err != nil {
 		return nil, err

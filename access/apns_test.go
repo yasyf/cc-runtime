@@ -107,14 +107,18 @@ func newAPNSFixture(t *testing.T) *apnsFixture {
 		now:    func() time.Time { return f.now },
 	}
 	f.mux = http.NewServeMux()
-	MountAPNS(f.mux, f.sender)
+	MountAPNS(f.mux, f.sender, apnsTestBearer)
 	return f
 }
+
+// apnsTestBearer is the pair bearer the fixture mounts registration under.
+const apnsTestBearer = "pair-bearer-1"
 
 func (f *apnsFixture) post(body string) *httptest.ResponseRecorder {
 	f.t.Helper()
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/api/push/device-tokens", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+apnsTestBearer)
 	f.mux.ServeHTTP(rec, req)
 	return rec
 }
@@ -196,6 +200,43 @@ func TestRegisterDeviceTokenRoundTripDedupes(t *testing.T) {
 	}
 	if events := f.events(); len(events) != 1 {
 		t.Fatalf("events after re-register = %+v, want still one (deduped by token)", events)
+	}
+}
+
+// TestRegisterDeviceTokenRequiresThePairBearer pins the loopback-bypass fix:
+// the daemon's auth layer admits tokenless loopback peers, so the handler must
+// demand the bearer itself before minting a durable delivery grant.
+func TestRegisterDeviceTokenRequiresThePairBearer(t *testing.T) {
+	body := fmt.Sprintf(`{"token":%q,"platform":"ios"}`, deviceToken(0))
+	for _, tc := range []struct {
+		id     string
+		mount  string
+		header string
+	}{
+		{id: "missing bearer", mount: apnsTestBearer},
+		{id: "wrong bearer", mount: apnsTestBearer, header: "Bearer nope"},
+		{id: "no token minted refuses even an empty bearer", mount: "", header: "Bearer "},
+	} {
+		t.Run(tc.id, func(t *testing.T) {
+			f := newAPNSFixture(t)
+			mux := http.NewServeMux()
+			MountAPNS(mux, f.sender, tc.mount)
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest("POST", "/api/push/device-tokens", strings.NewReader(body))
+			if tc.header != "" {
+				req.Header.Set("Authorization", tc.header)
+			}
+			mux.ServeHTTP(rec, req)
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("register = %d %s, want 401", rec.Code, rec.Body)
+			}
+			if got := f.tokens(); len(got) != 0 {
+				t.Fatalf("projected tokens = %v, want none", got)
+			}
+			if events := f.events(); len(events) != 0 {
+				t.Fatalf("events = %+v, want none", events)
+			}
+		})
 	}
 }
 

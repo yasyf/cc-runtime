@@ -3,6 +3,8 @@ package access
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -10,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -349,9 +352,16 @@ func apnsFailure(r io.Reader) (reason string, timestamp int64) {
 }
 
 // MountAPNS mounts device-token registration on the daemon's auth-guarded
-// mux, mirroring MountPush.
-func MountAPNS(mux *http.ServeMux, sender *APNSSender) {
+// mux, mirroring MountPush — but it re-checks the pair bearer itself: the
+// daemon's auth layer admits tokenless loopback peers, and a registration is
+// a durable remote delivery grant no local process may mint without the
+// token. With no token minted yet, every registration is refused.
+func MountAPNS(mux *http.ServeMux, sender *APNSSender, token string) {
 	mux.HandleFunc("POST /api/push/device-tokens", func(w http.ResponseWriter, r *http.Request) {
+		if !bearerAuthorized(r, token) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 		r.Body = http.MaxBytesReader(w, r.Body, maxDeviceRegistrationBytes)
 		var reg deviceRegistration
 		if err := json.NewDecoder(r.Body).Decode(&reg); err != nil {
@@ -377,6 +387,21 @@ func MountAPNS(mux *http.ServeMux, sender *APNSSender) {
 		}
 		writeJSON(w, map[string]bool{"ok": true})
 	})
+}
+
+// bearerAuthorized reports whether r presents the pair bearer token, comparing
+// SHA-256 digests in constant time so a length mismatch cannot be timed.
+func bearerAuthorized(r *http.Request, token string) bool {
+	if token == "" {
+		return false
+	}
+	candidate, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !ok {
+		return false
+	}
+	c := sha256.Sum256([]byte(candidate))
+	t := sha256.Sum256([]byte(token))
+	return subtle.ConstantTimeCompare(c[:], t[:]) == 1
 }
 
 // validateDeviceRegistration rejects a frame the sender could never deliver
