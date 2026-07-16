@@ -9,6 +9,7 @@ import (
 	"github.com/yasyf/cc-interact/daemon"
 
 	"github.com/yasyf/cc-runtime/interaction"
+	"github.com/yasyf/cc-runtime/mesh"
 )
 
 // runRPC executes the rpc command against the deps-resolved local daemon,
@@ -59,6 +60,33 @@ func TestRPCAllowedOpRoundTrips(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("rpc list did not surface the started subject %q; got %+v", subjectID, lr.Subjects)
+	}
+}
+
+// TestRPCMeshPresenceRoundTrips drives `rpc mesh.presence` through the passthrough
+// against the real daemon: the reply decodes into a Presence report — a live read
+// on darwin, the documented degradation elsewhere — proving the op is allowlisted
+// and the handler is wired.
+func TestRPCMeshPresenceRoundTrips(t *testing.T) {
+	newE2E(t)
+
+	out, err := runRPC(t, string(mesh.OpPresence))
+	if err != nil {
+		t.Fatalf("rpc mesh.presence: %v\n%s", err, out)
+	}
+	var reply daemon.Reply
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &reply); err != nil {
+		t.Fatalf("parse raw reply: %v\n%s", err, out)
+	}
+	if !reply.OK {
+		t.Fatalf("reply not ok: %s", reply.Error)
+	}
+	var p mesh.Presence
+	if err := json.Unmarshal(reply.Body, &p); err != nil {
+		t.Fatalf("parse presence body: %v", err)
+	}
+	if !p.Attended && p.Reason == "" {
+		t.Fatalf("unattended presence carries no reason: %+v", p)
 	}
 }
 

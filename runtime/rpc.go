@@ -11,6 +11,7 @@ import (
 	"github.com/yasyf/cc-interact/daemon"
 
 	"github.com/yasyf/cc-runtime/interaction"
+	"github.com/yasyf/cc-runtime/mesh"
 )
 
 // rpcAllowlist is the safe set of ops the low-level rpc passthrough may send to
@@ -21,6 +22,7 @@ var rpcAllowlist = map[daemon.Op]bool{
 	interaction.OpPending: true,
 	interaction.OpAnswer:  true,
 	interaction.OpNotify:  true,
+	mesh.OpPresence:       true,
 }
 
 // rpcCmd is the low-level RPC client: it sends one allowlisted op to the local

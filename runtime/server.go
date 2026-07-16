@@ -12,6 +12,7 @@ import (
 	"github.com/yasyf/cc-runtime/access"
 	"github.com/yasyf/cc-runtime/interaction"
 	"github.com/yasyf/cc-runtime/internal/web"
+	"github.com/yasyf/cc-runtime/mesh"
 	"github.com/yasyf/cc-runtime/version"
 )
 
@@ -97,6 +98,7 @@ func buildServer(ctx context.Context) (*daemon.Server, error) {
 		return nil, err
 	}
 	interaction.MountREST(s)
+	s.Register(mesh.OpPresence, mesh.PresenceHandler)
 	interaction.Register(s, pushFanout{senders: senders, background: s.Background})
 	return s, nil
 }
