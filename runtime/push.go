@@ -46,18 +46,19 @@ func (f pushFanout) Notification(subjectID string, n interaction.NotificationPay
 	})
 }
 
-// deliver runs every lane's fan-out off the handler's goroutine on the daemon
-// lifecycle: the serve context cancels in-flight sends at shutdown, and the
-// daemon drains them before closing the store. One lane's failure never
-// blocks another's delivery.
+// deliver runs each lane's fan-out on its own goroutine with its own deadline,
+// off the handler's goroutine on the daemon lifecycle: the serve context
+// cancels in-flight sends at shutdown, and the daemon drains them before
+// closing the store. One lane blocking to its deadline never delays or starves
+// another's delivery.
 func (f pushFanout) deliver(p access.PushPayload) {
-	f.background(func(ctx context.Context) {
-		ctx, cancel := context.WithTimeout(ctx, pushTimeout)
-		defer cancel()
-		for _, s := range f.senders {
+	for _, s := range f.senders {
+		f.background(func(ctx context.Context) {
+			ctx, cancel := context.WithTimeout(ctx, pushTimeout)
+			defer cancel()
 			if err := s.Fanout(ctx, p); err != nil {
 				log.Printf("[%s] push fanout: %v", interaction.AppName, err)
 			}
-		}
-	})
+		})
+	}
 }
