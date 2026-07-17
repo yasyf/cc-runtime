@@ -5,9 +5,10 @@ import (
 	"log"
 	"time"
 
+	"github.com/yasyf/synckit/hostregistry"
+
 	"github.com/yasyf/cc-runtime/access"
 	"github.com/yasyf/cc-runtime/interaction"
-	"github.com/yasyf/cc-runtime/mesh"
 )
 
 // pushTimeout bounds one background push fan-out across every delivery lane.
@@ -98,7 +99,7 @@ func (f pushFanout) route(subjectID, header string) {
 			return
 		}
 		if target != "" {
-			log.Printf("[%s] surfaced subject %s on attended peer %s", interaction.AppName, subjectID, mesh.HostNode(target))
+			log.Printf("[%s] surfaced subject %s on attended peer %s", interaction.AppName, subjectID, hostregistry.HostNode(target))
 		}
 	})
 }

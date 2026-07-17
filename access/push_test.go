@@ -89,9 +89,14 @@ func newPushFixture(t *testing.T) *pushFixture {
 }
 
 func (f *pushFixture) post(body string) *httptest.ResponseRecorder {
+	return f.postTyped(body, "application/json")
+}
+
+func (f *pushFixture) postTyped(body, contentType string) *httptest.ResponseRecorder {
 	f.t.Helper()
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/api/push/subscriptions", strings.NewReader(body))
+	req.Header.Set("Content-Type", contentType)
 	f.mux.ServeHTTP(rec, req)
 	return rec
 }
@@ -224,6 +229,22 @@ func TestSubscribeRoundTripDedupesByEndpoint(t *testing.T) {
 	}
 	if events := f.events(); len(events) != 1 {
 		t.Fatalf("events after re-subscribe = %+v, want still one (deduped by endpoint)", events)
+	}
+}
+
+// TestSubscribeRejectsNonJSONContentType pins the CSRF guard: a cross-site
+// "simple" POST (text/plain, form encodings — no CORS preflight needed) must
+// never register a push endpoint, even when peer trust admits the request.
+func TestSubscribeRejectsNonJSONContentType(t *testing.T) {
+	f := newPushFixture(t)
+	raw, _ := json.Marshal(testSubscription(t, "https://push.example/reg/csrf"))
+	for _, ct := range []string{"text/plain", "application/x-www-form-urlencoded", ""} {
+		if rec := f.postTyped(string(raw), ct); rec.Code != http.StatusUnsupportedMediaType {
+			t.Fatalf("subscribe with Content-Type %q = %d, want 415", ct, rec.Code)
+		}
+	}
+	if got := f.endpoints(); len(got) != 0 {
+		t.Fatalf("a non-JSON POST registered endpoints: %v", got)
 	}
 }
 

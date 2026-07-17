@@ -97,6 +97,9 @@ func (h *restHarness) request(method, url, body, bearer string) (int, string) {
 		reader = strings.NewReader(body)
 	}
 	req, err := http.NewRequest(method, url, reader)
+	if err == nil && method == http.MethodPost {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	if err != nil {
 		h.t.Fatalf("new request %s %s: %v", method, url, err)
 	}
@@ -290,6 +293,38 @@ func TestRESTAnswerFailsLoud(t *testing.T) {
 	}
 	if h.gateAllows() {
 		t.Fatal("gate must still block after failed answers")
+	}
+}
+
+// TestRESTAnswerRejectsNonJSONContentType pins the CSRF guard: a cross-site
+// "simple" POST (no CORS preflight needed) must never answer a question, even
+// when the loopback or trusted-peer bypass admits the request.
+func TestRESTAnswerRejectsNonJSONContentType(t *testing.T) {
+	h := newRESTHarness(t)
+	subjectID, questionID := h.ask(sampleQuestion("merge?"))
+	body := fmt.Sprintf(`{"question_id":%d,"selected":["yes"]}`, questionID)
+
+	for _, ct := range []string{"text/plain", "application/x-www-form-urlencoded", ""} {
+		t.Run("ct="+ct, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodPost, h.base+"/api/subjects/"+subjectID+"/answer", strings.NewReader(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ct != "" {
+				req.Header.Set("Content-Type", ct)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusUnsupportedMediaType {
+				t.Fatalf("answer with Content-Type %q = %d, want 415", ct, resp.StatusCode)
+			}
+		})
+	}
+	if got := h.status(subjectID); got != StatusAwaiting {
+		t.Fatalf("status after non-JSON answers = %q, want still awaiting (gate held)", got)
 	}
 }
 

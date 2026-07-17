@@ -5,6 +5,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/yasyf/synckit/hostregistry"
+
 	"github.com/yasyf/cc-runtime/mesh"
 )
 
@@ -21,8 +23,8 @@ func meshCmd() *cobra.Command {
 }
 
 // meshRouteCmd toggles and reports presence routing. Routing is on by default
-// wherever peers exist; `off` persists the opt-out in mesh.json without dropping
-// the peers, and `on` clears it.
+// wherever peers exist; `off` persists the opt-out in the shared state without
+// dropping the peers, and `on` clears it.
 func meshRouteCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "route <on|off|status>",
@@ -33,20 +35,21 @@ func meshRouteCmd() *cobra.Command {
 			switch args[0] {
 			case "on", "off":
 				off := args[0] == "off"
-				if _, err := meshStore().Update(c.Context(), func(g *mesh.Registry) error {
-					g.RouteOff = off
-					return nil
-				}); err != nil {
+				if err := mesh.SetRouteOff(c.Context(), off); err != nil {
 					return err
 				}
 				fmt.Fprintf(out, "presence routing %s\n", args[0])
 				return nil
 			case "status":
-				reg, err := meshStore().Load()
+				reg, err := mesh.Config.Load()
 				if err != nil {
 					return err
 				}
-				fmt.Fprintf(out, "presence routing: %s\n", routeStatus(reg))
+				routeOff, err := mesh.LoadRouteOff()
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(out, "presence routing: %s\n", routeStatus(reg, routeOff))
 				return nil
 			default:
 				return fmt.Errorf("unknown route action %q (want on, off, or status)", args[0])
@@ -58,11 +61,11 @@ func meshRouteCmd() *cobra.Command {
 
 // routeStatus describes routing for the mesh route status line: enabled, off via
 // the escape hatch, or off for want of peers.
-func routeStatus(reg *mesh.Registry) string {
+func routeStatus(reg *hostregistry.Registry, routeOff bool) string {
 	switch {
 	case len(reg.Hosts) == 0:
 		return "off (no peers registered)"
-	case reg.RouteOff:
+	case routeOff:
 		return "off"
 	default:
 		return "on"

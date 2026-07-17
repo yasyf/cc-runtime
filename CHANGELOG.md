@@ -7,13 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- A machine mesh. `cc-runtime host add <user@host>` verifies the peer is
-  reachable over ssh and has `cc-runtime` installed, records it in a
-  flock-guarded `mesh.json`, and — unless `--no-recurse` — shells
-  `cc-runtime host add <self> --no-recurse` on the peer so the registration
-  is mutual. This host's ssh identity is detected from tailscale, or set with
-  `--self`. `host list` shows registered peers with a live reachability and
-  install column probed concurrently, and `host rm` drops a peer.
+- A machine mesh, built on synckit's shared host registry, not a
+  cc-runtime-owned store. `cc-runtime host add <user@host>` verifies the peer
+  is reachable over ssh and has `cc-runtime` installed, records it in the
+  shared registry (`~/.config/synckit/state.json`, one file every synckit
+  consumer shares), and — unless `--no-recurse` — shells `cc-runtime host add
+  <self> --no-recurse` on the peer so the registration is mutual. This host's
+  ssh identity is detected from tailscale, or set with `--self`. `host list`
+  shows registered peers with a live reachability and install column probed
+  concurrently, and `host rm` drops a peer. The host-identity registry, ssh
+  transport, and console probe are synckit's (`hostregistry`, `presence`), not
+  reimplemented here.
 - Mesh-wide answering in the TUI. When the registry has peers, `cc-runtime
   tui` fans `interaction.list` across every machine, labels each awaiting
   subject with the machine it lives on, and resolves the one awaiting subject
@@ -22,9 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `interaction.answer` on that peer, showing when it releases the remote gate.
   An unreachable peer is marked unreachable instead of blanking the list; with
   no peers registered the local-only answer surface is unchanged.
-- `cc-runtime rpc <op> [--json <params>]` sends one envelope to the local
-  daemon over its unix socket and prints the raw reply as one JSON line,
-  exiting nonzero on an error reply — how a peer drives another over ssh. The
+- `cc-runtime rpc <op> [--json <params>] [--session <s>] [--claude-pid <n>]`
+  sends one envelope to the local daemon over its unix socket and prints the
+  raw reply as one JSON line, exiting nonzero on an error reply — how a peer
+  drives another over ssh; the identity flags stamp the envelope's window. The
   op must be on a safe allowlist (`interaction.list`, `interaction.pending`,
   `interaction.answer`, `interaction.notify`, `mesh.presence`); control ops
   stay off the remote surface.
@@ -36,10 +41,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   still happens against the origin over the mesh answer path, so no state
   forks. The push lanes always fire regardless (phones are
   location-independent); routing only adds a peer-machine surface. A console
-  is attended when this user owns an unlocked, unmirrored session — read from
-  `ioreg` and `netstat` on macOS, unattended-with-a-reason elsewhere.
-  `cc-runtime mesh route off` persists an opt-out in `mesh.json` without
-  dropping the peers; routing is on by default wherever peers exist.
+  is attended when this user owns an unlocked, unmirrored session — read via
+  synckit's `presence` probe (`ioreg` and `netstat` on macOS,
+  unattended-with-a-reason elsewhere). `cc-runtime mesh route off` persists an
+  opt-out in the shared synckit state under a cc-runtime-owned key (synckit
+  preserves it byte-for-byte across its own writes) without dropping the peers;
+  routing is on by default wherever peers exist.
 - Direct APNs delivery. `cc-runtime apns set --key <path>.p8 --key-id X
   --team-id Y --bundle-id Z` enables the lane, `--sandbox` targets Apple's
   sandbox environment, and `apns off` disables it. The daemon authenticates
@@ -74,6 +81,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   notification fans out to all subscriptions, and an endpoint the push
   service reports gone with a 404 or 410 is pruned.
 - Initial scaffolding.
+- Tokenless trust between mesh machines. When the shared synckit mesh state
+  exists, the daemon wires synckit's `meshtrust` provider into its HTTP plane:
+  every machine registered in the mesh is trusted by its tailnet addresses
+  (`TrustedPeer`/`TrustedOrigin`), and a loopback-bound daemon additionally
+  listens on its own tailnet addresses, reclaiming its last port when free. A
+  browser on a mesh machine reaches the daemon over the tailnet with no bearer
+  token; the pair/token and fingerprint-pinned TLS legs for phones and
+  off-mesh browsers are unchanged, and with no mesh state the daemon behaves
+  exactly as before.
 
 ### Security
 - Subscription registration is bounded. The body caps at 8 KiB, endpoint and
@@ -94,6 +110,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   payload (`fp`) for clients to pin, alongside the tailscale-cert tailnet leg.
 
 ### Fixed
+- A routed surface now stamps its origin identity (`--session
+  routed:<origin>:<subject>`) on the peer, so notifications routed from
+  different origin sessions land on distinct peer-side subjects instead of
+  colliding into one.
+- Presence routing no longer waits on a wedged peer's probe once an earlier
+  peer in registry order is known attended, and a failed surface on the chosen
+  peer falls over to the next attended peer instead of dropping the route.
+- A transient peer error while fetching a remote subject's open questions in
+  the TUI is surfaced and retried instead of permanently hiding the questions,
+  and a resolve poll that lands late can no longer swap the freshly-selected
+  subject mid-answer.
 - Two concurrent answers to the same question can no longer split the event
   log from the projection: the loser of the deduplicated append projects the
   winner's answer.

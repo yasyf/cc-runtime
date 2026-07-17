@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yasyf/synckit/hostregistry"
+
 	"github.com/yasyf/cc-runtime/mesh"
 )
 
@@ -26,7 +28,7 @@ func runMeshRoute(t *testing.T, args ...string) (string, error) {
 
 func seedPeer(t *testing.T, target string) {
 	t.Helper()
-	if _, err := meshStore().Update(context.Background(), func(g *mesh.Registry) error {
+	if _, err := mesh.Config.Update(context.Background(), func(g *hostregistry.Registry) error {
 		g.Self = "me@here.tail.ts.net"
 		g.UpsertHost(target)
 		return nil
@@ -35,10 +37,18 @@ func seedPeer(t *testing.T, target string) {
 	}
 }
 
+// isolateMesh points HOME (and clears XDG_CONFIG_HOME) at a fresh temp dir so the
+// shared registry writes stay isolated to the test.
+func isolateMesh(t *testing.T) {
+	t.Helper()
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("HOME", shortTempHome(t))
+}
+
 // TestMeshRouteStatusNoPeers proves status reports routing off for want of peers,
 // distinct from the explicit opt-out.
 func TestMeshRouteStatusNoPeers(t *testing.T) {
-	t.Setenv("HOME", shortTempHome(t))
+	isolateMesh(t)
 	out, err := runMeshRoute(t, "status")
 	if err != nil {
 		t.Fatalf("route status: %v", err)
@@ -48,10 +58,10 @@ func TestMeshRouteStatusNoPeers(t *testing.T) {
 	}
 }
 
-// TestMeshRouteToggle proves off/on persist RouteOff in mesh.json and status
-// reflects it while the peer stays registered.
+// TestMeshRouteToggle proves off/on persist RouteOff in the shared state and
+// status reflects it while the peer stays registered.
 func TestMeshRouteToggle(t *testing.T) {
-	t.Setenv("HOME", shortTempHome(t))
+	isolateMesh(t)
 	seedPeer(t, "u@peer.tail.ts.net")
 
 	if out, err := runMeshRoute(t, "status"); err != nil || !strings.Contains(out, "on") {
@@ -61,12 +71,16 @@ func TestMeshRouteToggle(t *testing.T) {
 	if out, err := runMeshRoute(t, "off"); err != nil || !strings.Contains(out, "presence routing off") {
 		t.Fatalf("route off = %q err=%v", out, err)
 	}
-	reg, err := meshStore().Load()
+	off, err := mesh.LoadRouteOff()
+	if err != nil {
+		t.Fatalf("load route off: %v", err)
+	}
+	if !off {
+		t.Fatal("route off did not persist RouteOff")
+	}
+	reg, err := mesh.Config.Load()
 	if err != nil {
 		t.Fatalf("load: %v", err)
-	}
-	if !reg.RouteOff {
-		t.Fatal("route off did not persist RouteOff")
 	}
 	if len(reg.Hosts) != 1 {
 		t.Fatalf("route off dropped peers: %+v", reg.Hosts)
@@ -78,15 +92,15 @@ func TestMeshRouteToggle(t *testing.T) {
 	if out, err := runMeshRoute(t, "on"); err != nil || !strings.Contains(out, "presence routing on") {
 		t.Fatalf("route on = %q err=%v", out, err)
 	}
-	reg, _ = meshStore().Load()
-	if reg.RouteOff {
+	off, _ = mesh.LoadRouteOff()
+	if off {
 		t.Fatal("route on did not clear RouteOff")
 	}
 }
 
 // TestMeshRouteUnknownAction rejects an action that is neither on, off, nor status.
 func TestMeshRouteUnknownAction(t *testing.T) {
-	t.Setenv("HOME", shortTempHome(t))
+	isolateMesh(t)
 	if _, err := runMeshRoute(t, "toggle"); err == nil {
 		t.Fatal("unknown action was not rejected")
 	}

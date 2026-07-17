@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/yasyf/cc-interact/daemon"
+	"github.com/yasyf/synckit/hostregistry"
 
 	"github.com/yasyf/cc-runtime/interaction"
 )
@@ -16,6 +17,9 @@ import (
 // localNode is the machine label for this host in a fan-out result when Self
 // carries no ssh identity yet.
 const localNode = "local"
+
+// maxConcurrentHosts bounds the parallel fan-out.
+const maxConcurrentHosts = 8
 
 // HostSubjects is one host's interaction.list result. Err is set (and Subjects
 // nil) when the host was unreachable or answered with a failure reply — a benign
@@ -36,7 +40,7 @@ func (h HostSubjects) Node() string {
 	if h.Local {
 		return localNode
 	}
-	return HostNode(h.Host)
+	return hostregistry.HostNode(h.Host)
 }
 
 // HostPending is one host's interaction.pending result for a subject, with the
@@ -53,7 +57,7 @@ func (h HostPending) Node() string {
 	if h.Local {
 		return localNode
 	}
-	return HostNode(h.Host)
+	return hostregistry.HostNode(h.Host)
 }
 
 // listParams is the interaction.list rpc body: the scope to list subjects in.
@@ -83,7 +87,8 @@ type answerBody struct {
 }
 
 // fanTarget binds one machine to the runner that reaches it: the local machine
-// runs `cc-runtime rpc` as a subprocess against its own socket, a peer over ssh.
+// runs `cc-runtime rpc` locally, a peer over ssh. local selects Local vs SSH on
+// the runner.
 type fanTarget struct {
 	host   string
 	local  bool
@@ -91,8 +96,9 @@ type fanTarget struct {
 }
 
 // fanTargets is Self followed by every peer, in registry order — the merge order
-// the fan-out preserves, local first.
-func fanTargets(reg *Registry, local Runner, dial func(target string) Runner) []fanTarget {
+// the fan-out preserves, local first. local is the runner for this machine; dial
+// binds each peer to its runner.
+func fanTargets(reg *hostregistry.Registry, local Runner, dial func(target string) Runner) []fanTarget {
 	out := make([]fanTarget, 0, len(reg.Hosts)+1)
 	out = append(out, fanTarget{host: reg.Self, local: true, runner: local})
 	for _, h := range reg.Hosts {
@@ -105,18 +111,18 @@ func (t fanTarget) node() string {
 	if t.local && t.host == "" {
 		return localNode
 	}
-	return HostNode(t.host)
+	return hostregistry.HostNode(t.host)
 }
 
 // ListAll fans interaction.list across Self and every peer concurrently — the
-// local machine via LocalRunner (a `cc-runtime rpc interaction.list` subprocess
-// that dials this host's socket), each peer via `ssh target cc-runtime rpc
-// interaction.list` — and returns one HostSubjects per machine in merge order
-// (local first). A dead or erroring host becomes a per-host {Host, Err} result so
-// one unreachable peer never blanks the mesh; a malformed reply from a live host
-// (unparseable envelope or body) fails the whole call loud, since that is a
-// protocol break, not a reachability blip.
-func ListAll(ctx context.Context, reg *Registry, scope string, local Runner, dial func(target string) Runner) ([]HostSubjects, error) {
+// local machine via `cc-runtime rpc interaction.list` (against this host's
+// socket), each peer via `ssh target cc-runtime rpc interaction.list` — and
+// returns one HostSubjects per machine in merge order (local first). A dead or
+// erroring host becomes a per-host {Host, Err} result so one unreachable peer
+// never blanks the mesh; a malformed reply from a live host (unparseable envelope
+// or body) fails the whole call loud, since that is a protocol break, not a
+// reachability blip.
+func ListAll(ctx context.Context, reg *hostregistry.Registry, scope string, local Runner, dial func(target string) Runner) ([]HostSubjects, error) {
 	targets := fanTargets(reg, local, dial)
 	results := make([]HostSubjects, len(targets))
 	fatals := make([]error, len(targets))
@@ -131,7 +137,7 @@ func ListAll(ctx context.Context, reg *Registry, scope string, local Runner, dia
 
 func listOne(ctx context.Context, t fanTarget, scope string) (HostSubjects, error) {
 	hs := HostSubjects{Host: t.host, Local: t.local}
-	reply, raw, err := meshRPC(ctx, t.runner, interaction.OpList, listParams{Scope: scope})
+	reply, raw, err := meshRPC(ctx, t, interaction.OpList, "", listParams{Scope: scope})
 	if err != nil {
 		if isMalformed(raw) {
 			return hs, fmt.Errorf("malformed interaction.list reply from %s: %w", t.node(), err)
@@ -156,7 +162,7 @@ func listOne(ctx context.Context, t fanTarget, scope string) (HostSubjects, erro
 // mirroring ListAll's transport, per-host tolerance, and fail-loud contract. A
 // subject lives on exactly one machine, so at most one result carries questions;
 // the rest come back empty.
-func PendingAll(ctx context.Context, reg *Registry, subjectID string, local Runner, dial func(target string) Runner) ([]HostPending, error) {
+func PendingAll(ctx context.Context, reg *hostregistry.Registry, subjectID string, local Runner, dial func(target string) Runner) ([]HostPending, error) {
 	targets := fanTargets(reg, local, dial)
 	results := make([]HostPending, len(targets))
 	fatals := make([]error, len(targets))
@@ -171,7 +177,7 @@ func PendingAll(ctx context.Context, reg *Registry, subjectID string, local Runn
 
 func pendingOne(ctx context.Context, t fanTarget, subjectID string) (HostPending, error) {
 	hp := HostPending{Host: t.host, Local: t.local}
-	reply, raw, err := meshRPC(ctx, t.runner, interaction.OpPending, pendingParams{SubjectID: subjectID})
+	reply, raw, err := meshRPC(ctx, t, interaction.OpPending, "", pendingParams{SubjectID: subjectID})
 	if err != nil {
 		if isMalformed(raw) {
 			return hp, fmt.Errorf("malformed interaction.pending reply from %s: %w", t.node(), err)
@@ -195,34 +201,63 @@ func pendingOne(ctx context.Context, t fanTarget, subjectID string) (HostPending
 // `cc-runtime rpc interaction.answer` there, and reports whether the answer idled
 // the subject (released its edit gate). Unlike the read fan-outs it targets one
 // host and returns every failure as an error — an answer that does not land is
-// never silently dropped.
-func AnswerRemote(ctx context.Context, runner Runner, target string, a interaction.AnswerPayload) (bool, error) {
-	reply, _, err := meshRPC(ctx, runner, interaction.OpAnswer, a)
+// never silently dropped. The failover dial's at-least-once retry is safe here:
+// the daemon dedupes a repeated answer per question, keeping the first.
+func AnswerRemote(ctx context.Context, r Runner, target string, a interaction.AnswerPayload) (bool, error) {
+	reply, _, err := meshRPC(ctx, fanTarget{host: target, runner: r}, interaction.OpAnswer, "", a)
 	if err != nil {
-		return false, fmt.Errorf("answer on %s: %w", HostNode(target), err)
+		return false, fmt.Errorf("answer on %s: %w", hostregistry.HostNode(target), err)
 	}
 	if !reply.OK {
-		return false, fmt.Errorf("answer on %s: %s", HostNode(target), reply.Error)
+		return false, fmt.Errorf("answer on %s: %s", hostregistry.HostNode(target), reply.Error)
 	}
 	var body answerBody
 	if err := json.Unmarshal(reply.Body, &body); err != nil {
-		return false, fmt.Errorf("decode interaction.answer reply from %s: %w", HostNode(target), err)
+		return false, fmt.Errorf("decode interaction.answer reply from %s: %w", hostregistry.HostNode(target), err)
 	}
 	return body.Idled, nil
 }
 
-// meshRPC runs `cc-runtime rpc <op> --json <params>` through runner and decodes
-// the daemon.Reply the passthrough prints. It returns raw stdout so the caller
-// can separate an unreachable host (no output) from a live host that answered
-// with a non-reply (output present) — the malformed case. A decoded reply yields
-// a nil error even on a nonzero exit, since the passthrough exits nonzero on an
+// meshRPC runs `cc-runtime rpc <op> [--session <s>] --json -` — locally for
+// this machine, over ssh for a peer — feeding the JSON params over stdin, and
+// decodes the daemon.Reply the passthrough prints. session, when non-empty,
+// stamps the envelope's window identity on the peer (the routed-surface path);
+// the read fan-outs pass "". It returns raw stdout so the caller can separate
+// an unreachable host (no output) from a live host that answered with a
+// non-reply (output present) — the malformed case. A decoded reply yields a nil
+// error even on a nonzero exit, since the passthrough exits nonzero on an
 // OK=false reply the caller reads via reply.OK.
-func meshRPC(ctx context.Context, runner Runner, op daemon.Op, params any) (daemon.Reply, string, error) {
+func meshRPC(ctx context.Context, t fanTarget, op daemon.Op, session string, params any) (daemon.Reply, string, error) {
+	return runRPC(ctx, t, op, session, params, false)
+}
+
+// meshRPCOnce is meshRPC over a single dial attempt, for the non-idempotent
+// notify op: the failover dial re-runs the remote command at-least-once, which
+// would duplicate an append the peer already recorded. Answers ride the
+// failover leg instead — the daemon dedupes repeated answers per question.
+func meshRPCOnce(ctx context.Context, t fanTarget, op daemon.Op, session string, params any) (daemon.Reply, string, error) {
+	return runRPC(ctx, t, op, session, params, true)
+}
+
+func runRPC(ctx context.Context, t fanTarget, op daemon.Op, session string, params any, once bool) (daemon.Reply, string, error) {
 	b, err := json.Marshal(params)
 	if err != nil {
 		return daemon.Reply{}, "", err
 	}
-	stdout, _, runErr := runner.Run(ctx, Binary, "rpc", string(op), "--json", string(b))
+	var stdout string
+	var runErr error
+	switch {
+	case t.local:
+		args := []string{"rpc", string(op)}
+		if session != "" {
+			args = append(args, "--session", session)
+		}
+		stdout, runErr = t.runner.Local(ctx, b, Binary, append(args, "--json", "-")...)
+	case once:
+		stdout, runErr = t.runner.SSHOnce(ctx, t.host, rpcRemoteCmd(op, session), b)
+	default:
+		stdout, runErr = t.runner.SSH(ctx, t.host, rpcRemoteCmd(op, session), b)
+	}
 	trimmed := strings.TrimSpace(stdout)
 	if trimmed == "" {
 		if runErr != nil {
@@ -235,6 +270,17 @@ func meshRPC(ctx context.Context, runner Runner, op daemon.Op, params any) (daem
 		return daemon.Reply{}, stdout, err
 	}
 	return reply, stdout, nil
+}
+
+// rpcRemoteCmd is the one-line remote shell command that runs an allowlisted op
+// on a peer, reading its JSON params from stdin (`--json -`) so the payload
+// never rides the ssh or remote-shell argv.
+func rpcRemoteCmd(op daemon.Op, session string) string {
+	cmd := Binary + " rpc " + hostregistry.ShellQuote(string(op))
+	if session != "" {
+		cmd += " --session " + hostregistry.ShellQuote(session)
+	}
+	return cmd + " --json -"
 }
 
 // isMalformed reports whether a failed meshRPC produced output — a live host that

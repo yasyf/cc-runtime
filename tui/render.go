@@ -58,7 +58,12 @@ func (m Model) render() string {
 	} else {
 		b.WriteString(hintStyle.Render(fmt.Sprintf("%d open · subject %s", open, short(m.res.SubjectID))))
 	}
-	b.WriteString("\n\n")
+	b.WriteString("\n")
+	if m.reseedNote != "" {
+		b.WriteString(urgentStyle.Render(m.reseedNote))
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
 
 	q, ok := m.focused()
 	if !ok {

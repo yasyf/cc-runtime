@@ -4,16 +4,17 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
-	"github.com/yasyf/cc-runtime/mesh"
+	"github.com/yasyf/synckit/hostregistry"
 )
 
 func TestPrintHostListEmpty(t *testing.T) {
 	var out bytes.Buffer
-	reg := &mesh.Registry{Self: "alice@mac.tail.ts.net"}
-	if err := printHostList(context.Background(), &out, reg, sshRunner); err != nil {
+	reg := &hostregistry.Registry{Self: "alice@mac.tail.ts.net"}
+	if err := printHostList(context.Background(), &out, reg, meshDial); err != nil {
 		t.Fatalf("printHostList: %v", err)
 	}
 	got := out.String()
@@ -27,43 +28,48 @@ func TestPrintHostListEmpty(t *testing.T) {
 
 func TestPrintHostListLiveColumn(t *testing.T) {
 	var out bytes.Buffer
-	reg := &mesh.Registry{
+	reg := &hostregistry.Registry{
 		Self:  "alice@mac.tail.ts.net",
-		Hosts: []string{"bob@srv.tail.ts.net", "carol@lap.tail.ts.net"},
+		Hosts: []string{"bob@srv.tail.ts.net", "dave@bare.tail.ts.net", "carol@lap.tail.ts.net"},
 	}
-	dial := func(target string) mesh.Runner {
-		m := mesh.NewMockRunner()
-		if target == "carol@lap.tail.ts.net" {
-			return m.On("true", "", errors.New("down"))
+	dial := func(target string) hostregistry.Runner {
+		m := hostregistry.NewMockRunner()
+		switch target {
+		case "carol@lap.tail.ts.net":
+			// Unreachable: every probe fails.
+			return m.DefaultSSH("", errors.New("down"))
+		case "dave@bare.tail.ts.net":
+			// Reachable but cc-runtime not installed.
+			return m.OnSSH("command -v cc-runtime", "", errors.New("exit status 1")).
+				OnSSH("true", "", nil)
+		default:
+			return m.OnSSH("command -v cc-runtime", "/usr/local/bin/cc-runtime\n", nil).
+				OnSSH("--version", "1.4.2\n", nil)
 		}
-		return m.On("true", "", nil).
-			On("command -v cc-runtime", "/usr/local/bin/cc-runtime\n", nil).
-			On("version", "1.4.2\n", nil)
 	}
 	if err := printHostList(context.Background(), &out, reg, dial); err != nil {
 		t.Fatalf("printHostList: %v", err)
 	}
-	got := out.String()
-	for _, want := range []string{"bob@srv.tail.ts.net", "srv", "1.4.2", "carol@lap.tail.ts.net", "lap"} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("host list missing %q:\n%s", want, got)
-		}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 5 {
+		t.Fatalf("host list = %d lines, want self + header + 3 rows:\n%s", len(lines), out.String())
 	}
-	// carol is down: her row shows no/-, bob is up: yes.
-	lines := strings.Split(strings.TrimSpace(got), "\n")
-	var bobLine, carolLine string
-	for _, l := range lines {
-		if strings.HasPrefix(l, "bob@") {
-			bobLine = l
-		}
-		if strings.HasPrefix(l, "carol@") {
-			carolLine = l
-		}
+	if lines[0] != "self: alice@mac.tail.ts.net" {
+		t.Fatalf("self line = %q", lines[0])
 	}
-	if !strings.Contains(bobLine, "yes") {
-		t.Fatalf("bob should be reachable: %q", bobLine)
+	if fields := strings.Fields(lines[1]); !slices.Equal(fields, []string{"TARGET", "NODE", "REACHABLE", "INSTALLED", "VERSION"}) {
+		t.Fatalf("header = %v", fields)
 	}
-	if !strings.Contains(carolLine, "no") {
-		t.Fatalf("carol should be unreachable: %q", carolLine)
+	// Rows hold registry input order with exact per-column values, so a
+	// reachable-but-bare host can never pass as unreachable (or vice versa).
+	wantRows := [][]string{
+		{"bob@srv.tail.ts.net", "srv", "yes", "yes", "1.4.2"},
+		{"dave@bare.tail.ts.net", "bare", "yes", "no", "-"},
+		{"carol@lap.tail.ts.net", "lap", "no", "no", "-"},
+	}
+	for i, want := range wantRows {
+		if got := strings.Fields(lines[2+i]); !slices.Equal(got, want) {
+			t.Fatalf("row %d = %v, want %v", i, got, want)
+		}
 	}
 }

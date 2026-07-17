@@ -17,6 +17,8 @@ import (
 	webpush "github.com/SherClockHolmes/webpush-go"
 	"github.com/yasyf/cc-interact/daemon"
 	"github.com/yasyf/cc-interact/event"
+
+	"github.com/yasyf/cc-runtime/interaction"
 )
 
 // PushSubjectID is the well-known subject keying push-plane events (subscribe,
@@ -311,6 +313,9 @@ func MountPush(mux *http.ServeMux, sender *PushSender) {
 		writeJSON(w, map[string]string{"key": sender.keys.Public})
 	})
 	mux.HandleFunc("POST /api/push/subscriptions", func(w http.ResponseWriter, r *http.Request) {
+		if !interaction.RequireJSON(w, r) {
+			return
+		}
 		r.Body = http.MaxBytesReader(w, r.Body, maxSubscriptionBytes)
 		var sub webpush.Subscription
 		if err := json.NewDecoder(r.Body).Decode(&sub); err != nil {

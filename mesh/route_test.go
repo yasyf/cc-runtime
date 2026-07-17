@@ -6,11 +6,18 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yasyf/cc-interact/daemon"
+	"github.com/yasyf/synckit/hostregistry"
 
 	"github.com/yasyf/cc-runtime/interaction"
 )
+
+// attendedFn is a Router.Attended seam returning a fixed local-attendance verdict.
+func attendedFn(attended bool) func(context.Context) (bool, error) {
+	return func(context.Context) (bool, error) { return attended, nil }
+}
 
 // presenceReply marshals the daemon.Reply a peer's `rpc mesh.presence` prints.
 func presenceReply(attended bool) string {
@@ -28,36 +35,41 @@ func okNotifyReply() string {
 
 // attendedPeer scripts a peer runner that reports attended and accepts a surface.
 func attendedPeer() *MockRunner {
-	return NewMockRunner().On("mesh.presence", presenceReply(true), nil).On("interaction.notify", okNotifyReply(), nil)
+	return NewMockRunner().OnSSH("mesh.presence", presenceReply(true), nil).OnSSH("interaction.notify", okNotifyReply(), nil)
 }
 
 // unattendedPeer scripts a peer runner that reports unattended.
 func unattendedPeer() *MockRunner {
-	return NewMockRunner().On("mesh.presence", presenceReply(false), nil)
+	return NewMockRunner().OnSSH("mesh.presence", presenceReply(false), nil)
 }
 
 // deadPeer scripts an unreachable peer: every probe errors with empty output.
 func deadPeer() *MockRunner {
-	return NewMockRunner().Default("", errors.New("ssh: connect timed out"))
+	return NewMockRunner().DefaultSSH("", errors.New("ssh: connect timed out"))
 }
 
-func seedStore(t *testing.T, self string, routeOff bool, hosts ...string) Store {
+// seedMesh isolates HOME to a temp dir and seeds the shared registry with self,
+// hosts, and the route-off flag, returning nothing — Route reads the shared state
+// fresh each call.
+func seedMesh(t *testing.T, self string, routeOff bool, hosts ...string) {
 	t.Helper()
-	s := Store{Dir: t.TempDir()}
-	if _, err := s.Update(context.Background(), func(g *Registry) error {
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("HOME", t.TempDir())
+	if _, err := Config.Update(context.Background(), func(g *hostregistry.Registry) error {
 		g.Self = self
 		for _, h := range hosts {
 			g.UpsertHost(h)
 		}
-		g.RouteOff = routeOff
 		return nil
 	}); err != nil {
-		t.Fatalf("seed store: %v", err)
+		t.Fatalf("seed registry: %v", err)
 	}
-	return s
+	if err := SetRouteOff(context.Background(), routeOff); err != nil {
+		t.Fatalf("seed route off: %v", err)
+	}
 }
 
-func dialer(runners map[string]*MockRunner) func(string) Runner {
+func mockDialer(runners map[string]*MockRunner) func(string) Runner {
 	return func(target string) Runner {
 		r, ok := runners[target]
 		if !ok {
@@ -67,47 +79,32 @@ func dialer(runners map[string]*MockRunner) func(string) Runner {
 	}
 }
 
-// notifyPayload extracts the NotificationPayload a runner was asked to surface,
-// failing when it received no interaction.notify call.
-func notifyPayload(t *testing.T, r *MockRunner) interaction.NotificationPayload {
+// notifyCall returns the interaction.notify surface a runner received, failing
+// when it received none.
+func notifyCall(t *testing.T, r *MockRunner, target string) MockCall {
 	t.Helper()
-	for _, call := range r.Calls() {
-		if !strings.Contains(strings.Join(call, " "), "interaction.notify") {
-			continue
-		}
-		for i, a := range call {
-			if a == "--json" && i+1 < len(call) {
-				var n interaction.NotificationPayload
-				if err := json.Unmarshal([]byte(call[i+1]), &n); err != nil {
-					t.Fatalf("decode surfaced payload: %v", err)
-				}
-				return n
-			}
+	for _, c := range r.SSHCalls(target) {
+		if strings.Contains(c.Cmd, "interaction.notify") {
+			return c
 		}
 	}
-	t.Fatalf("runner received no interaction.notify surface: %v", r.Calls())
-	return interaction.NotificationPayload{}
+	t.Fatalf("runner received no interaction.notify surface against %q: %v", target, r.SSHCmdsAll())
+	return MockCall{}
 }
 
 func surfaced(r *MockRunner) bool {
-	for _, call := range r.Calls() {
-		if strings.Contains(strings.Join(call, " "), "interaction.notify") {
-			return true
-		}
-	}
-	return false
+	return sshCmdContains(r, "interaction.notify")
 }
 
 // TestRouteAttendedLocalNoWalk proves an attended local console short-circuits
 // before any peer probe — the human is already here.
 func TestRouteAttendedLocalNoWalk(t *testing.T) {
-	me := currentUser(t)
+	seedMesh(t, "me@here", false, "u@peer")
 	peer := attendedPeer()
 	r := Router{
-		Store: seedStore(t, "me@here", false, "u@peer"),
-		Local: darwinRunner(ioregPlist(false, true, false, me), netstatHeaderLine),
-		Dial:  dialer(map[string]*MockRunner{"u@peer": peer}),
-		GOOS:  osDarwin,
+		Local:    NewMockRunner(),
+		Dial:     mockDialer(map[string]*MockRunner{"u@peer": peer}),
+		Attended: attendedFn(true),
 	}
 	target, err := r.Route(context.Background(), "subj-1", "Deploy?")
 	if err != nil {
@@ -116,8 +113,8 @@ func TestRouteAttendedLocalNoWalk(t *testing.T) {
 	if target != "" {
 		t.Fatalf("target = %q, want no surface (local attended)", target)
 	}
-	if len(peer.Calls()) != 0 {
-		t.Fatalf("attended local still walked peers: %v", peer.Calls())
+	if len(peer.SSHCmdsAll()) != 0 {
+		t.Fatalf("attended local still walked peers: %v", peer.SSHCmdsAll())
 	}
 }
 
@@ -125,13 +122,12 @@ func TestRouteAttendedLocalNoWalk(t *testing.T) {
 // order and surfaces on the first attended one, leaving later attended peers
 // unsurfaced.
 func TestRouteFirstAttendedWins(t *testing.T) {
+	seedMesh(t, "me@origin.tail.ts.net", false, "u@p1", "u@p2", "u@p3")
 	p1, p2, p3 := unattendedPeer(), attendedPeer(), attendedPeer()
-	runners := map[string]*MockRunner{"u@p1": p1, "u@p2": p2, "u@p3": p3}
 	r := Router{
-		Store: seedStore(t, "me@origin.tail.ts.net", false, "u@p1", "u@p2", "u@p3"),
-		Local: NewMockRunner(),
-		Dial:  dialer(runners),
-		GOOS:  "linux", // local unattended by degradation
+		Local:    NewMockRunner(),
+		Dial:     mockDialer(map[string]*MockRunner{"u@p1": p1, "u@p2": p2, "u@p3": p3}),
+		Attended: attendedFn(false),
 	}
 	target, err := r.Route(context.Background(), "subj-9", "Ship it?")
 	if err != nil {
@@ -146,24 +142,189 @@ func TestRouteFirstAttendedWins(t *testing.T) {
 	if surfaced(p1) || surfaced(p3) {
 		t.Fatalf("a non-winning peer was surfaced (p1=%v p3=%v)", surfaced(p1), surfaced(p3))
 	}
-	got := notifyPayload(t, p2)
+	call := notifyCall(t, p2, "u@p2")
+	// Non-idempotent write: single dial attempt, never the failover leg.
+	if call.Kind != "ssh-once" {
+		t.Fatalf("surface kind = %q, want ssh-once (no failover re-run)", call.Kind)
+	}
+	var got interaction.NotificationPayload
+	if err := json.Unmarshal([]byte(call.Stdin), &got); err != nil {
+		t.Fatalf("decode surfaced payload off stdin: %v", err)
+	}
 	if got.Urgency != "" {
 		t.Fatalf("surfaced urgency = %q, want empty so the peer never re-routes it", got.Urgency)
 	}
 	if !strings.Contains(got.Message, "origin") || !strings.Contains(got.Message, "subj-9") {
 		t.Fatalf("surfaced message %q missing origin host or subject", got.Message)
 	}
+	if strings.Contains(call.Cmd, "needs you") {
+		t.Fatalf("surface cmd %q leaked the payload onto argv", call.Cmd)
+	}
+	// The surface stamps the origin identity so peer-side subjects never collide
+	// across origin sessions.
+	wantSession := "--session " + hostregistry.ShellQuote("routed:me@origin.tail.ts.net:subj-9")
+	if !strings.Contains(call.Cmd, wantSession) {
+		t.Fatalf("surface cmd missing %q; calls = %v", wantSession, p2.SSHCmdsAll())
+	}
+}
+
+// TestRouteFallsOverToNextAttendedPeer proves a failed surface on the first
+// attended peer falls over to the next attended peer instead of dropping the
+// route.
+func TestRouteFallsOverToNextAttendedPeer(t *testing.T) {
+	seedMesh(t, "me@origin", false, "u@p1", "u@p2")
+	p1 := NewMockRunner().
+		OnSSH("mesh.presence", presenceReply(true), nil).
+		OnSSH("interaction.notify", "", errors.New("ssh: broken pipe"))
+	p2 := attendedPeer()
+	r := Router{
+		Local:    NewMockRunner(),
+		Dial:     mockDialer(map[string]*MockRunner{"u@p1": p1, "u@p2": p2}),
+		Attended: attendedFn(false),
+	}
+	target, err := r.Route(context.Background(), "subj-10", "?")
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if target != "u@p2" {
+		t.Fatalf("target = %q, want u@p2 (fallback after p1's failed surface)", target)
+	}
+	if !surfaced(p1) || !surfaced(p2) {
+		t.Fatalf("surface attempts p1=%v p2=%v, want both in order", surfaced(p1), surfaced(p2))
+	}
+}
+
+// wedgedSurfaceRunner reports attended instantly but wedges every notify until
+// its context dies, like a peer whose daemon hangs mid-surface.
+type wedgedSurfaceRunner struct{}
+
+func (wedgedSurfaceRunner) Local(context.Context, []byte, string, ...string) (string, error) {
+	panic("wedgedSurfaceRunner is ssh-only")
+}
+
+func (wedgedSurfaceRunner) SSH(ctx context.Context, _, remoteCmd string, _ []byte) (string, error) {
+	return wedgeOrPresence(ctx, remoteCmd)
+}
+
+func (wedgedSurfaceRunner) SSHOnce(ctx context.Context, _, remoteCmd string, _ []byte) (string, error) {
+	return wedgeOrPresence(ctx, remoteCmd)
+}
+
+func wedgeOrPresence(ctx context.Context, remoteCmd string) (string, error) {
+	if strings.Contains(remoteCmd, "mesh.presence") {
+		return presenceReply(true), nil
+	}
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
+// TestRouteWedgedSurfaceFallsOverWithLiveContext proves a first surface that
+// hangs to its per-attempt deadline still leaves the next attended peer a live
+// context — the failover is not attempted with an already-cancelled context.
+func TestRouteWedgedSurfaceFallsOverWithLiveContext(t *testing.T) {
+	old := attemptTimeout
+	attemptTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { attemptTimeout = old })
+	seedMesh(t, "me@origin", false, "u@wedged", "u@live")
+	live := attendedPeer()
+	r := Router{
+		Local: NewMockRunner(),
+		Dial: func(target string) Runner {
+			if target == "u@live" {
+				return live
+			}
+			return wedgedSurfaceRunner{}
+		},
+		Attended: attendedFn(false),
+	}
+	target, err := r.Route(context.Background(), "subj-13", "?")
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if target != "u@live" {
+		t.Fatalf("target = %q, want u@live after the wedged surface timed out", target)
+	}
+	if !surfaced(live) {
+		t.Fatal("failover surface never reached the live peer")
+	}
+}
+
+// TestRouteAllSurfacesFailReturnsError proves every attended peer's failed
+// surface is returned, never silently dropped.
+func TestRouteAllSurfacesFailReturnsError(t *testing.T) {
+	seedMesh(t, "me@origin", false, "u@p1", "u@p2")
+	failing := func() *MockRunner {
+		return NewMockRunner().
+			OnSSH("mesh.presence", presenceReply(true), nil).
+			OnSSH("interaction.notify", "", errors.New("ssh: broken pipe"))
+	}
+	r := Router{
+		Local:    NewMockRunner(),
+		Dial:     mockDialer(map[string]*MockRunner{"u@p1": failing(), "u@p2": failing()}),
+		Attended: attendedFn(false),
+	}
+	target, err := r.Route(context.Background(), "subj-11", "?")
+	if target != "" || err == nil {
+		t.Fatalf("target=%q err=%v, want no surface and the joined failures", target, err)
+	}
+	for _, node := range []string{"p1", "p2"} {
+		if !strings.Contains(err.Error(), node) {
+			t.Fatalf("err = %v, want both failed peers named", err)
+		}
+	}
+}
+
+// slowRunner blocks every probe until its context cancels, simulating a wedged
+// peer.
+type slowRunner struct{}
+
+func (slowRunner) Local(context.Context, []byte, string, ...string) (string, error) {
+	panic("slowRunner is ssh-only")
+}
+
+func (slowRunner) SSH(ctx context.Context, _, _ string, _ []byte) (string, error) {
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
+func (slowRunner) SSHOnce(ctx context.Context, _, _ string, _ []byte) (string, error) {
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
+// TestRouteSlowProbeDoesNotDelayDecidedPrefix proves routing surfaces on an
+// already-decided attended peer without waiting for a slower peer's probe.
+func TestRouteSlowProbeDoesNotDelayDecidedPrefix(t *testing.T) {
+	seedMesh(t, "me@origin", false, "u@fast", "u@slow")
+	fast := attendedPeer()
+	r := Router{
+		Local: NewMockRunner(),
+		Dial: func(target string) Runner {
+			if target == "u@fast" {
+				return fast
+			}
+			return slowRunner{}
+		},
+		Attended: attendedFn(false),
+	}
+	target, err := r.Route(context.Background(), "subj-12", "?")
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if target != "u@fast" {
+		t.Fatalf("target = %q, want u@fast without waiting on the wedged peer", target)
+	}
 }
 
 // TestRouteDeadPeerSkipped proves an unreachable peer is skipped rather than
 // aborting the walk — routing lands on the next attended peer.
 func TestRouteDeadPeerSkipped(t *testing.T) {
+	seedMesh(t, "me@origin", false, "u@dead", "u@live")
 	dead, live := deadPeer(), attendedPeer()
 	r := Router{
-		Store: seedStore(t, "me@origin", false, "u@dead", "u@live"),
-		Local: NewMockRunner(),
-		Dial:  dialer(map[string]*MockRunner{"u@dead": dead, "u@live": live}),
-		GOOS:  "linux",
+		Local:    NewMockRunner(),
+		Dial:     mockDialer(map[string]*MockRunner{"u@dead": dead, "u@live": live}),
+		Attended: attendedFn(false),
 	}
 	target, err := r.Route(context.Background(), "subj-2", "?")
 	if err != nil {
@@ -177,12 +338,12 @@ func TestRouteDeadPeerSkipped(t *testing.T) {
 // TestRouteAllUnattendedFallsBack proves an unattended host with no attended peer
 // (all dead or unattended) falls back with no surface.
 func TestRouteAllUnattendedFallsBack(t *testing.T) {
+	seedMesh(t, "me@origin", false, "u@dead", "u@off")
 	dead, off := deadPeer(), unattendedPeer()
 	r := Router{
-		Store: seedStore(t, "me@origin", false, "u@dead", "u@off"),
-		Local: NewMockRunner(),
-		Dial:  dialer(map[string]*MockRunner{"u@dead": dead, "u@off": off}),
-		GOOS:  "linux",
+		Local:    NewMockRunner(),
+		Dial:     mockDialer(map[string]*MockRunner{"u@dead": dead, "u@off": off}),
+		Attended: attendedFn(false),
 	}
 	target, err := r.Route(context.Background(), "subj-3", "?")
 	if err != nil {
@@ -199,12 +360,12 @@ func TestRouteAllUnattendedFallsBack(t *testing.T) {
 // TestRouteOffDisablesWalk proves the escape hatch skips routing entirely while
 // leaving the peers registered.
 func TestRouteOffDisablesWalk(t *testing.T) {
+	seedMesh(t, "me@origin", true, "u@peer")
 	peer := attendedPeer()
 	r := Router{
-		Store: seedStore(t, "me@origin", true, "u@peer"),
-		Local: NewMockRunner(),
-		Dial:  dialer(map[string]*MockRunner{"u@peer": peer}),
-		GOOS:  "linux",
+		Local:    NewMockRunner(),
+		Dial:     mockDialer(map[string]*MockRunner{"u@peer": peer}),
+		Attended: attendedFn(false),
 	}
 	target, err := r.Route(context.Background(), "subj-4", "?")
 	if err != nil {
@@ -213,18 +374,18 @@ func TestRouteOffDisablesWalk(t *testing.T) {
 	if target != "" {
 		t.Fatalf("target = %q, want no surface (route off)", target)
 	}
-	if len(peer.Calls()) != 0 {
-		t.Fatalf("route off still probed peers: %v", peer.Calls())
+	if len(peer.SSHCmdsAll()) != 0 {
+		t.Fatalf("route off still probed peers: %v", peer.SSHCmdsAll())
 	}
 }
 
 // TestRouteNoPeersFallsBack proves an empty registry routes nowhere.
 func TestRouteNoPeersFallsBack(t *testing.T) {
+	seedMesh(t, "me@origin", false)
 	r := Router{
-		Store: seedStore(t, "me@origin", false),
-		Local: NewMockRunner(),
-		Dial:  dialer(map[string]*MockRunner{}),
-		GOOS:  "linux",
+		Local:    NewMockRunner(),
+		Dial:     mockDialer(map[string]*MockRunner{}),
+		Attended: attendedFn(false),
 	}
 	target, err := r.Route(context.Background(), "subj-5", "?")
 	if err != nil {
@@ -238,14 +399,14 @@ func TestRouteNoPeersFallsBack(t *testing.T) {
 // TestRouteSurfaceErrorPropagates proves a surface that fails on the chosen peer
 // returns the error — a surface that does not land is never silently dropped.
 func TestRouteSurfaceErrorPropagates(t *testing.T) {
+	seedMesh(t, "me@origin", false, "u@peer")
 	peer := NewMockRunner().
-		On("mesh.presence", presenceReply(true), nil).
-		On("interaction.notify", "", errors.New("ssh: broken pipe"))
+		OnSSH("mesh.presence", presenceReply(true), nil).
+		OnSSH("interaction.notify", "", errors.New("ssh: broken pipe"))
 	r := Router{
-		Store: seedStore(t, "me@origin", false, "u@peer"),
-		Local: NewMockRunner(),
-		Dial:  dialer(map[string]*MockRunner{"u@peer": peer}),
-		GOOS:  "linux",
+		Local:    NewMockRunner(),
+		Dial:     mockDialer(map[string]*MockRunner{"u@peer": peer}),
+		Attended: attendedFn(false),
 	}
 	if _, err := r.Route(context.Background(), "subj-6", "?"); err == nil {
 		t.Fatal("Route returned nil, want the failed surface propagated")
@@ -285,19 +446,21 @@ func TestRoutedNotificationShape(t *testing.T) {
 // TestRoutingEnabled table-drives the config guard.
 func TestRoutingEnabled(t *testing.T) {
 	tests := []struct {
-		name string
-		reg  Registry
-		want bool
+		name     string
+		hosts    []string
+		routeOff bool
+		want     bool
 	}{
-		{"peers, routing on", Registry{Hosts: []string{"u@a"}}, true},
-		{"peers, routing off", Registry{Hosts: []string{"u@a"}, RouteOff: true}, false},
-		{"no peers", Registry{}, false},
-		{"no peers, off is moot", Registry{RouteOff: true}, false},
+		{"peers, routing on", []string{"u@a"}, false, true},
+		{"peers, routing off", []string{"u@a"}, true, false},
+		{"no peers", nil, false, false},
+		{"no peers, off is moot", nil, true, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := RoutingEnabled(&tc.reg); got != tc.want {
-				t.Fatalf("RoutingEnabled(%+v) = %v, want %v", tc.reg, got, tc.want)
+			reg := &hostregistry.Registry{Hosts: tc.hosts}
+			if got := RoutingEnabled(reg, tc.routeOff); got != tc.want {
+				t.Fatalf("RoutingEnabled(%v, %v) = %v, want %v", tc.hosts, tc.routeOff, got, tc.want)
 			}
 		})
 	}

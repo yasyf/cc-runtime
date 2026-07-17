@@ -8,6 +8,7 @@ import (
 	"github.com/yasyf/cc-interact/channel"
 	"github.com/yasyf/cc-interact/daemon"
 	"github.com/yasyf/cc-interact/sse"
+	"github.com/yasyf/synckit/meshtrust"
 
 	"github.com/yasyf/cc-runtime/access"
 	"github.com/yasyf/cc-runtime/interaction"
@@ -18,9 +19,10 @@ import (
 
 // buildServer composes the cc-runtime daemon: the interaction ops, the edit
 // gate, the projection schema, the channel presence lifecycle, the access
-// plane (bind, token, Bonjour, tailnet TLS) from persisted access config, and
-// the push lanes — Web Push always, direct APNs when configured — feeding
-// every question/notification append.
+// plane (bind, token, Bonjour, tailnet TLS) from persisted access config,
+// tokenless mesh trust when the shared synckit mesh state exists, and the
+// push lanes — Web Push always, direct APNs when configured — feeding every
+// question/notification append.
 func buildServer(ctx context.Context) (*daemon.Server, error) {
 	st := access.Store{Dir: interaction.AppPaths().StateDir()}
 	acfg, err := st.ReadConfig()
@@ -75,6 +77,13 @@ func buildServer(ctx context.Context) (*daemon.Server, error) {
 			cfg.ExtraHTTPListeners = append(cfg.ExtraHTTPListeners, access.TLSListenerFactory(ts, certs))
 		}
 	}
+	// Tokenless mesh trust: no synckit state ⇒ nil provider ⇒ the pair/token
+	// and TLS legs above run exactly as before.
+	if tp := meshtrust.Detect(); tp != nil {
+		cfg.TrustedPeer = tp.TrustedPeer
+		cfg.TrustedOrigin = tp.TrustedOrigin
+		cfg.ExtraHTTPListeners = append(cfg.ExtraHTTPListeners, tailnetListeners(interaction.AppPaths(), acfg.Bind, tp.SelfAddrs(ctx))...)
+	}
 	s, err := daemon.New(cfg)
 	if err != nil {
 		return nil, err
@@ -99,7 +108,7 @@ func buildServer(ctx context.Context) (*daemon.Server, error) {
 	}
 	interaction.MountREST(s)
 	s.Register(mesh.OpPresence, mesh.PresenceHandler)
-	router := mesh.NewRouter(meshStore(), mesh.LocalRunner{}, sshRunner)
+	router := mesh.NewRouter(mesh.NewExecRunner(), rpcDial)
 	interaction.Register(s, pushFanout{senders: senders, background: s.Background, router: router})
 	return s, nil
 }

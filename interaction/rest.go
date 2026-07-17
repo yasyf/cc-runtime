@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"mime"
 	"net/http"
 
 	"github.com/yasyf/cc-interact/daemon"
@@ -69,11 +70,30 @@ func (rs *restServer) handlePending(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, pendingReply{Questions: questions})
 }
 
+// RequireJSON rejects a request whose Content-Type is not application/json
+// with 415, reporting whether the caller may proceed. Every state-changing
+// JSON route sits behind it as CSRF hardening: the daemon's auth layer admits
+// tokenless loopback and trusted-peer requests under a localhost Origin, and a
+// hostile page on such a machine can fire preflight-free "simple" POSTs
+// (text/plain, form encodings) — but it cannot send application/json without a
+// CORS preflight the daemon never answers.
+func RequireJSON(w http.ResponseWriter, r *http.Request) bool {
+	mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mt != "application/json" {
+		http.Error(w, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
+		return false
+	}
+	return true
+}
+
 // handleAnswer maps POST /api/subjects/{id}/answer onto the socket answer op's
 // core: same idempotent dedup, same append-first gate release. The path names
 // the subject; a body subject_id may only restate it. Unknown targets are 404,
 // malformed bodies 400 — never a silent success.
 func (rs *restServer) handleAnswer(w http.ResponseWriter, r *http.Request) {
+	if !RequireJSON(w, r) {
+		return
+	}
 	id := r.PathValue("id")
 	r.Body = http.MaxBytesReader(w, r.Body, maxAnswerBytes)
 	var a AnswerPayload

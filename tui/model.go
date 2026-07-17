@@ -9,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/yasyf/cc-interact/daemon"
+	"github.com/yasyf/synckit/hostregistry"
 
 	"github.com/yasyf/cc-runtime/interaction"
 	"github.com/yasyf/cc-runtime/mesh"
@@ -30,6 +31,11 @@ type resolvedMsg struct{ Res resolution }
 
 // pollTickMsg fires the OpList refresh while no subject is awaiting yet.
 type pollTickMsg struct{}
+
+// resolveIdleMsg reports a resolve poll that produced nothing to apply — the
+// transient daemon-unavailable window during a version-skew swap — so the next
+// tick may dispatch a fresh poll.
+type resolveIdleMsg struct{}
 
 // multiAwaitingMsg fires when a poll finds more than one awaiting subject in the
 // scope — a transient, non-latching state. It carries an informative note the
@@ -70,9 +76,26 @@ type meshResolvedMsg struct {
 
 // reseededMsg carries the subject's still-open questions read from the daemon's
 // OpPending projection at resolve time, so a relaunch re-fetches every open
-// question regardless of where the resumed stream cursor landed. A failed fetch
-// is non-fatal: the stream still delivers events, so reseed errors are dropped.
-type reseededMsg struct{ Questions []question }
+// question regardless of where the resumed stream cursor landed. Err is set only
+// on the remote path, where pending is the sole question source: the model
+// surfaces it and retries. A failed local fetch stays dropped — the live stream
+// still delivers events.
+type reseededMsg struct {
+	Questions []question
+	Err       error
+}
+
+// reseedRetryMsg re-runs the remote reseed after a failed fetch.
+type reseedRetryMsg struct{}
+
+// remoteCallTimeout bounds every mesh call a TUI command dispatches (resolve
+// fan-out, reseed, answer): ssh's keepalives only catch dead connections, so a
+// wedged remote `cc-runtime rpc` would otherwise hang its command forever.
+const remoteCallTimeout = 30 * time.Second
+
+// maxReseedFails caps the remote reseed retry loop: past it the failure latches
+// into the fatal error screen instead of silently polling a broken peer forever.
+const maxReseedFails = 5
 
 // errMsg surfaces a fatal resolution or stream error into the View.
 type errMsg struct{ Err error }
@@ -106,7 +129,7 @@ type Model struct {
 	// peers. When nil the model runs the untouched local-only path (OpList over the
 	// socket). When set, the resolve poll fans interaction.list across the mesh via
 	// ListAll and a remote-resolved subject is answered over ssh via AnswerRemote.
-	reg   *mesh.Registry
+	reg   *hostregistry.Registry
 	local mesh.Runner
 	dial  func(target string) mesh.Runner
 
@@ -116,6 +139,9 @@ type Model struct {
 
 	res      resolution
 	resolved bool
+	// resolving marks an in-flight resolve poll, so a tick never stacks a second
+	// fan-out behind a slow one.
+	resolving bool
 	// idled records whether the last remote answer released the subject's gate, so
 	// the done view can show the remote release.
 	idled bool
@@ -140,6 +166,12 @@ type Model struct {
 	// the multiple-awaiting hint). Unlike err it never blocks the UI and clears on
 	// the next poll that settles, so a transient scope-in-flux can't wedge the TUI.
 	waitNote string
+
+	// reseedNote surfaces a failed remote question fetch while the retry loop
+	// runs, so a transient peer error never silently hides remote questions.
+	reseedNote string
+	// reseedFails counts consecutive failed remote reseeds toward maxReseedFails.
+	reseedFails int
 
 	feed []notification
 
@@ -189,6 +221,10 @@ func pollTick() tea.Cmd {
 	return tea.Tick(pollInterval, func(time.Time) tea.Msg { return pollTickMsg{} })
 }
 
+func reseedRetryTick() tea.Cmd {
+	return tea.Tick(pollInterval, func(time.Time) tea.Msg { return reseedRetryMsg{} })
+}
+
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -203,19 +239,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.resolved {
 			return m, nil
 		}
+		if m.resolving {
+			return m, pollTick()
+		}
+		m.resolving = true
 		return m, tea.Batch(m.resolveCmd(), pollTick())
+
+	case resolveIdleMsg:
+		m.resolving = false
+		return m, nil
 
 	case multiAwaitingMsg:
 		// Non-latching: surface the hint while still polling. The next poll that
 		// settles to one awaiting subject resolves and clears it.
+		m.resolving = false
 		m.waitNote = multiAwaitingNote
 		return m, nil
 
 	case clearWaitNoteMsg:
+		m.resolving = false
 		m.waitNote = ""
 		return m, nil
 
 	case meshResolvedMsg:
+		// A poll that lands after resolution is stale unless it re-resolves the
+		// same subject: acting on it could swap the subject mid-answer.
+		m.resolving = false
+		if m.resolved && (!msg.found || msg.res.SubjectID != m.res.SubjectID) {
+			return m, nil
+		}
 		// Store the roster, then reuse the local resolved/multi/clear handlers.
 		m.roster = msg.roster
 		switch {
@@ -228,16 +280,37 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case resolvedMsg:
+		// Stale unless unresolved or re-resolving the same subject (the stream
+		// error recovery path).
+		m.resolving = false
+		if m.resolved && msg.Res.SubjectID != m.res.SubjectID {
+			return m, nil
+		}
+		alreadyStreaming := m.resolved
 		m.err = nil
 		m.waitNote = ""
 		m.resolved = true
 		m.res = msg.Res
-		if m.startStream != nil {
+		// Start the stream once: a same-subject re-resolve must not attach a
+		// second consumer to (and later double-close) the events channel.
+		if !alreadyStreaming && m.startStream != nil {
 			m.startStream(msg.Res)
 		}
 		return m, m.reseedCmd()
 
 	case reseededMsg:
+		if msg.Err != nil {
+			m.reseedFails++
+			if m.reseedFails >= maxReseedFails {
+				m.reseedNote = ""
+				m.err = msg.Err
+				return m, nil
+			}
+			m.reseedNote = "fetching remote questions failed (" + msg.Err.Error() + "); retrying"
+			return m, reseedRetryTick()
+		}
+		m.reseedFails = 0
+		m.reseedNote = ""
 		for _, q := range msg.Questions {
 			if m.hasQuestion(q.ID) {
 				continue
@@ -246,6 +319,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.advance()
 		return m, nil
+
+	case reseedRetryMsg:
+		if !m.resolved {
+			return m, nil
+		}
+		return m, m.reseedCmd()
 
 	case liveEvent:
 		if msg.Err != nil {
@@ -268,6 +347,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case errMsg:
+		m.resolving = false
 		m.err = msg.Err
 		return m, nil
 	}
@@ -426,7 +506,7 @@ func (m Model) machineLabel() string {
 	if m.res.Local {
 		return "local"
 	}
-	return mesh.HostNode(m.res.Host)
+	return hostregistry.HostNode(m.res.Host)
 }
 
 // submitCmd builds the payload and submits it, reporting the outcome back into
@@ -442,7 +522,9 @@ func (m Model) submitCmd() tea.Cmd {
 		host := m.res.Host
 		runner := m.dial(host)
 		return func() tea.Msg {
-			idled, err := mesh.AnswerRemote(context.Background(), runner, host, a)
+			ctx, cancel := context.WithTimeout(context.Background(), remoteCallTimeout)
+			defer cancel()
+			idled, err := mesh.AnswerRemote(ctx, runner, host, a)
 			if err != nil {
 				return submittedMsg{QuestionID: a.QuestionID, Err: err}
 			}
@@ -475,7 +557,7 @@ func (m Model) resolveCmd() tea.Cmd {
 	return func() tea.Msg {
 		res, found, multiple, err := resolveAwaiting(context.Background(), client, scope)
 		if errors.Is(err, daemon.ErrDaemonUnavailable) {
-			return nil
+			return resolveIdleMsg{}
 		}
 		if err != nil {
 			return errMsg{Err: err}
@@ -501,7 +583,9 @@ func (m Model) meshResolveCmd() tea.Cmd {
 	local := m.local
 	dial := m.dial
 	return func() tea.Msg {
-		results, err := mesh.ListAll(context.Background(), reg, scope, local, dial)
+		ctx, cancel := context.WithTimeout(context.Background(), remoteCallTimeout)
+		defer cancel()
+		results, err := mesh.ListAll(ctx, reg, scope, local, dial)
 		if err != nil {
 			return errMsg{Err: err}
 		}
@@ -533,21 +617,30 @@ func (m Model) reseedCmd() tea.Cmd {
 }
 
 // remoteReseedCmd reads a remote subject's open questions via PendingAll — the
-// remote path has no SSE stream, so pending is its only question source. A fetch
-// error is non-fatal, matching the local reseed.
+// remote path has no SSE stream, so pending is its only question source. Any
+// failure, including the owning host's per-host error, comes back as
+// reseededMsg.Err so the model surfaces it and retries.
 func (m Model) remoteReseedCmd() tea.Cmd {
 	reg := m.reg
 	local := m.local
 	dial := m.dial
 	subjectID := m.res.SubjectID
+	host := m.res.Host
 	return func() tea.Msg {
-		results, err := mesh.PendingAll(context.Background(), reg, subjectID, local, dial)
+		ctx, cancel := context.WithTimeout(context.Background(), remoteCallTimeout)
+		defer cancel()
+		results, err := mesh.PendingAll(ctx, reg, subjectID, local, dial)
 		if err != nil {
-			return reseededMsg{}
+			return reseededMsg{Err: err}
+		}
+		for _, h := range results {
+			if h.Host == host && h.Err != nil {
+				return reseededMsg{Err: h.Err}
+			}
 		}
 		qs, err := remoteQuestions(results)
 		if err != nil {
-			return reseededMsg{}
+			return reseededMsg{Err: err}
 		}
 		return reseededMsg{Questions: qs}
 	}

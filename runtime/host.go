@@ -4,16 +4,27 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sync"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 
+	"github.com/yasyf/synckit/hostregistry"
+
 	"github.com/yasyf/cc-runtime/mesh"
 )
 
-func meshStore() mesh.Store { return mesh.Store{Dir: appPaths().StateDir()} }
+// maxVerifyHosts bounds the concurrent host-verify fan-out.
+const maxVerifyHosts = 8
 
-func sshRunner(target string) mesh.Runner { return mesh.SSHRunner{Target: target} }
+func meshRunner() hostregistry.Runner { return hostregistry.NewExecRunner() }
+
+// meshDial binds a peer to the ssh runner that reaches it; the exec runner takes
+// the target on each SSH call, so every peer shares one stateless runner.
+func meshDial(string) hostregistry.Runner { return hostregistry.NewExecRunner() }
+
+// rpcDial is meshDial for the rpc fan-out's stdin-fed transport.
+func rpcDial(string) mesh.Runner { return mesh.NewExecRunner() }
 
 // hostCmd manages the machine mesh: the peers this host reaches over ssh and
 // how peers reach this host.
@@ -33,15 +44,15 @@ func hostAddCmd() *cobra.Command {
 		Use:   "add <user@host>",
 		Short: "Register a peer and cross-register this host on it over ssh",
 		Long: "Add verifies the peer is reachable over ssh and has cc-runtime installed, records it in " +
-			"the mesh, and — unless --no-recurse — shells `cc-runtime host add <self> --no-recurse` on the " +
-			"peer so the registration is mutual. This host's ssh identity is detected from tailscale; pass " +
+			"the shared mesh, and — unless --no-recurse — shells `cc-runtime host add <self> --no-recurse` on " +
+			"the peer so the registration is mutual. This host's ssh identity is detected from tailscale; pass " +
 			"--self to override when tailscale is unavailable.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			target := args[0]
 			out := c.OutOrStdout()
 			step := func(msg string) { fmt.Fprintln(out, msg) }
-			return meshStore().AddHost(c.Context(), mesh.LocalRunner{}, sshRunner(target), target, self, noRecurse, step)
+			return mesh.AddHost(c.Context(), meshRunner(), target, self, noRecurse, step)
 		},
 	}
 	c.Flags().BoolVar(&noRecurse, "no-recurse", false, "skip cross-registering this host on the peer")
@@ -55,11 +66,11 @@ func hostListCmd() *cobra.Command {
 		Short: "List mesh peers with a live reachability probe",
 		Args:  cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
-			reg, err := meshStore().Load()
+			reg, err := mesh.Config.Load()
 			if err != nil {
 				return err
 			}
-			return printHostList(c.Context(), c.OutOrStdout(), reg, sshRunner)
+			return printHostList(c.Context(), c.OutOrStdout(), reg, meshDial)
 		},
 	}
 }
@@ -71,10 +82,7 @@ func hostRemoveCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			target := args[0]
-			if _, err := meshStore().Update(c.Context(), func(g *mesh.Registry) error {
-				g.RemoveHost(target)
-				return nil
-			}); err != nil {
+			if err := mesh.Config.RemoveHost(c.Context(), target); err != nil {
 				return err
 			}
 			fmt.Fprintf(c.OutOrStdout(), "removed %s\n", target)
@@ -84,21 +92,41 @@ func hostRemoveCmd() *cobra.Command {
 }
 
 // printHostList renders the registry: this host's self identity, then a table of
-// peers with a live reachability/install column probed concurrently.
-func printHostList(ctx context.Context, out io.Writer, reg *mesh.Registry, dial func(string) mesh.Runner) error {
+// peers with a live reachability/install column probed concurrently for the
+// cc-runtime binary.
+func printHostList(ctx context.Context, out io.Writer, reg *hostregistry.Registry, dial func(string) hostregistry.Runner) error {
 	fmt.Fprintf(out, "self: %s\n", orDash(reg.Self))
 	if len(reg.Hosts) == 0 {
 		fmt.Fprintln(out, "no peers registered")
 		return nil
 	}
-	results := mesh.VerifyAll(ctx, reg.Hosts, dial)
+	results := verifyHosts(ctx, reg.Hosts, dial)
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "TARGET\tNODE\tREACHABLE\tINSTALLED\tVERSION")
 	for _, r := range results {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-			r.Target, mesh.HostNode(r.Target), yesNo(r.Reachable), yesNo(r.Installed), orDash(r.Version))
+			r.Target, hostregistry.HostNode(r.Target), yesNo(r.Reachable), yesNo(r.Bootstrapped), orDash(r.Version))
 	}
 	return tw.Flush()
+}
+
+// verifyHosts probes every peer concurrently (bounded) for the cc-runtime binary,
+// returning one result per host in input order.
+func verifyHosts(ctx context.Context, hosts []string, dial func(string) hostregistry.Runner) []hostregistry.VerifyResult {
+	results := make([]hostregistry.VerifyResult, len(hosts))
+	sem := make(chan struct{}, maxVerifyHosts)
+	var wg sync.WaitGroup
+	for i, h := range hosts {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, h string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			results[i] = mesh.Config.VerifyBinary(ctx, dial(h), h, mesh.Binary)
+		}(i, h)
+	}
+	wg.Wait()
+	return results
 }
 
 func yesNo(b bool) string {

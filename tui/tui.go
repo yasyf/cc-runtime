@@ -61,7 +61,7 @@ func run(ctx context.Context, d cmd.Deps, scope string) error {
 			go streamInto(ctx, d, scope, res, events)
 		}
 	}
-	if err := wireMesh(&model, d); err != nil {
+	if err := wireMesh(&model); err != nil {
 		return err
 	}
 
@@ -74,8 +74,8 @@ func run(ctx context.Context, d cmd.Deps, scope string) error {
 // then fans interaction.list across every machine and a remote subject is
 // answered over ssh. With no peers the model keeps its untouched local-only path.
 // A corrupt registry fails loud rather than silently dropping the mesh.
-func wireMesh(model *Model, d cmd.Deps) error {
-	reg, err := (mesh.Store{Dir: d.Paths.StateDir()}).Load()
+func wireMesh(model *Model) error {
+	reg, err := mesh.Config.Load()
 	if err != nil {
 		return err
 	}
@@ -83,8 +83,8 @@ func wireMesh(model *Model, d cmd.Deps) error {
 		return nil
 	}
 	model.reg = reg
-	model.local = mesh.LocalRunner{}
-	model.dial = func(target string) mesh.Runner { return mesh.SSHRunner{Target: target} }
+	model.local = mesh.NewExecRunner()
+	model.dial = func(string) mesh.Runner { return mesh.NewExecRunner() }
 	return nil
 }
 

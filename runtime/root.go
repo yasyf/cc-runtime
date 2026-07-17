@@ -16,9 +16,14 @@ func Root() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "cc-runtime",
 		Short:         "Richer, persistent, remotely-answerable Claude Code harness tools",
+		Version:       version.Version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
+	// The mesh verify probes a peer's `cc-runtime --version`, so print the bare
+	// version (matching the `version` subcommand) rather than cobra's default
+	// "<name> version <v>" line.
+	root.SetVersionTemplate("{{.Version}}\n")
 	root.AddCommand(
 		versionCmd(),
 		cmd.DaemonCmd(d),
