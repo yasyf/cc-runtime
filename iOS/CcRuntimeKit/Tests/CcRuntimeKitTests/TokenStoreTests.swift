@@ -6,12 +6,12 @@ import Testing
 @Suite("TokenStore")
 struct TokenStoreTests {
     @Test(
-        "needsUpgrade fires only on a present, non-hardened accessibility class",
+        "needsUpgrade fires only on a backup-migratable class, never a device-bound one",
         arguments: [
             (kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String, false),
             (kSecAttrAccessibleWhenUnlocked as String, true),
             (kSecAttrAccessibleAfterFirstUnlock as String, true),
-            (kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String, true),
+            (kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String, false),
         ]
     )
     func needsUpgradeDecision(accessibility: String, expected: Bool) {
