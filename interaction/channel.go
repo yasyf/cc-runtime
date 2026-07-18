@@ -161,6 +161,16 @@ func awaitAnswer(ctx context.Context, client *daemon.Client, session, scope stri
 // inline, long-polling for the human's answer. pid is Claude's window pid (the
 // channel server runs as a child of claude, so its own os.Getpid is the wrong
 // owner); it stamps ClaudePID on every envelope so subjects bind to the window.
+//
+// Subject-key invariant: the durable key is (session, scope) — cc-interact's
+// resolver enforces UNIQUE(session_id, scope) and CAS-rebinds claude_pid
+// toward each envelope's window, which is what lets a resumed claude (same
+// session, fresh pid) reconnect to its subject and pending questions. Pid
+// therefore must never join the key, and (session, scope) must be unique
+// across concurrently-live claudes: two live processes sharing one — e.g. an
+// orchestrated agent plus a manual `cc-runtime wrap -- claude --resume
+// <session>` in the same scope — rebind the same subject back and forth and
+// share its questions and edit-gate state. That launch is unsupported.
 func ChannelTools(_ context.Context, session, scope string, pid int) ([]channel.Tool, string, string, error) {
 	client := daemon.NewClient(AppPaths().SocketPath())
 

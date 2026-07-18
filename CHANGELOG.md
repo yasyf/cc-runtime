@@ -125,6 +125,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   payload (`fp`) for clients to pin, alongside the tailscale-cert tailnet leg.
 
 ### Fixed
+- Racing subscription registrations at the stored-set cap can no longer
+  overshoot it: the cap check and the durable append run serialized for both
+  Web Push subscriptions and APNs device tokens, so concurrent registrations
+  for the last slot admit exactly one.
+- Documented the interaction subject-key invariant (interaction/channel.go):
+  the durable key is (session, scope) and the pid is a rebindable window
+  binding, so a resumed claude (same session, fresh pid) reconnects to its
+  subject and pending questions. Two concurrently-live claudes sharing one
+  (session, scope) — e.g. an orchestrated agent plus a manual `wrap -- claude
+  --resume` of its session in the same scope — share interaction state and are
+  unsupported.
 - A routed surface now stamps its origin identity (`--session
   routed:<origin>:<subject>`) on the peer, so notifications routed from
   different origin sessions land on distinct peer-side subjects instead of

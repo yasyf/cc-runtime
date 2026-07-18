@@ -117,7 +117,10 @@ type httpDoer interface {
 
 // APNSSender fans frames out to every registered device token over HTTP/2,
 // authenticating with the cached ES256 provider token. The HTTP client is the
-// injected network boundary; signing, registration, and pruning are real.
+// injected network boundary; signing, registration, and pruning are real. mu
+// serializes registration for the same reason as PushSender.mu: the cap must
+// refuse before the durable append, so only in-process serialization keeps
+// concurrent registrations at the cap from overshooting.
 type APNSSender struct {
 	auth   *apnsAuth
 	topic  string
@@ -126,6 +129,7 @@ type APNSSender struct {
 	append daemon.AppendFunc
 	client httpDoer
 	now    func() time.Time
+	mu     sync.Mutex
 }
 
 // NewAPNSSender builds a sender from an enabled config, loading the .p8 key
@@ -159,6 +163,8 @@ func NewAPNSSender(cfg APNSConfig, db *sql.DB, append daemon.AppendFunc) (*APNSS
 // passes and refreshes created_at, so a delayed invalidation can be ordered
 // against it.
 func (a *APNSSender) Register(ctx context.Context, token, platform string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	var others int
 	if err := a.db.QueryRowContext(ctx,
 		`SELECT count(*) FROM apns_device_tokens WHERE token<>?`, token).Scan(&others); err != nil {

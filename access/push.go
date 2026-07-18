@@ -115,12 +115,17 @@ type pushEventFrame struct {
 
 // PushSender fans frames out to every registered Web Push subscription. The
 // HTTP client is the injected network boundary; everything else — VAPID
-// signing, payload encryption, registration, pruning — is real.
+// signing, payload encryption, registration, pruning — is real. mu serializes
+// registration so concurrent registrations at the cap cannot overshoot: the
+// cap must refuse before the durable append, so no DB constraint can enforce
+// it. The daemon is the store's single writer, so in-process serialization is
+// the bound; prunes only shrink the set and skip it.
 type PushSender struct {
 	keys   VAPIDKeys
 	db     *sql.DB
 	append daemon.AppendFunc
 	client webpush.HTTPClient
+	mu     sync.Mutex
 }
 
 // NewPushSender returns a sender delivering over the default HTTP client;
@@ -135,6 +140,8 @@ func NewPushSender(keys VAPIDKeys, db *sql.DB, append daemon.AppendFunc) *PushSe
 // maxSubscriptions is refused (ErrSubscriptionLimit); re-registering a stored
 // endpoint always passes.
 func (p *PushSender) Subscribe(ctx context.Context, sub webpush.Subscription) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	var others int
 	if err := p.db.QueryRowContext(ctx,
 		`SELECT count(*) FROM push_subscriptions WHERE endpoint<>?`, sub.Endpoint).Scan(&others); err != nil {

@@ -296,6 +296,46 @@ func TestRegisterDeviceTokenCapsStoredSet(t *testing.T) {
 	}
 }
 
+// TestRegisterDeviceTokenConcurrentAtCapHoldsBound races registrations for the
+// last slot: exactly one wins, the rest refuse, and the stored set never
+// overshoots.
+func TestRegisterDeviceTokenConcurrentAtCapHoldsBound(t *testing.T) {
+	f := newAPNSFixture(t)
+	for i := range maxDeviceTokens - 1 {
+		f.register(deviceToken(i))
+	}
+
+	const racers = 8
+	errs := make([]error, racers)
+	var wg sync.WaitGroup
+	for i := range racers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = f.sender.Register(context.Background(), deviceToken(maxDeviceTokens+i), "ios")
+		}()
+	}
+	wg.Wait()
+
+	var admitted, refused int
+	for _, err := range errs {
+		switch {
+		case err == nil:
+			admitted++
+		case errors.Is(err, ErrDeviceTokenLimit):
+			refused++
+		default:
+			t.Fatalf("Register: %v", err)
+		}
+	}
+	if admitted != 1 || refused != racers-1 {
+		t.Fatalf("admitted = %d, refused = %d, want 1 and %d", admitted, refused, racers-1)
+	}
+	if got := f.tokens(); len(got) != maxDeviceTokens {
+		t.Fatalf("stored tokens = %d, want %d", len(got), maxDeviceTokens)
+	}
+}
+
 func TestAPNSFanoutDeliversToEveryDevice(t *testing.T) {
 	f := newAPNSFixture(t)
 	tokens := []string{deviceToken(0), deviceToken(1)}

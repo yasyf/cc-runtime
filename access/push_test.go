@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -339,6 +340,49 @@ func TestSubscribeCapsStoredSet(t *testing.T) {
 	f.subscribe(testSubscription(t, "https://push.example/reg/000"))
 	if got := f.endpoints(); len(got) != maxSubscriptions {
 		t.Fatalf("stored subscriptions after re-register = %d, want %d", len(got), maxSubscriptions)
+	}
+}
+
+// TestSubscribeConcurrentAtCapHoldsBound races registrations for the last slot:
+// exactly one wins, the rest refuse, and the stored set never overshoots.
+func TestSubscribeConcurrentAtCapHoldsBound(t *testing.T) {
+	f := newPushFixture(t)
+	for i := range maxSubscriptions - 1 {
+		f.subscribe(testSubscription(t, fmt.Sprintf("https://push.example/reg/%03d", i)))
+	}
+
+	const racers = 8
+	subs := make([]webpush.Subscription, racers)
+	for i := range subs {
+		subs[i] = testSubscription(t, fmt.Sprintf("https://push.example/racer/%d", i))
+	}
+	errs := make([]error, racers)
+	var wg sync.WaitGroup
+	for i := range racers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = f.sender.Subscribe(context.Background(), subs[i])
+		}()
+	}
+	wg.Wait()
+
+	var admitted, refused int
+	for _, err := range errs {
+		switch {
+		case err == nil:
+			admitted++
+		case errors.Is(err, ErrSubscriptionLimit):
+			refused++
+		default:
+			t.Fatalf("Subscribe: %v", err)
+		}
+	}
+	if admitted != 1 || refused != racers-1 {
+		t.Fatalf("admitted = %d, refused = %d, want 1 and %d", admitted, refused, racers-1)
+	}
+	if got := f.endpoints(); len(got) != maxSubscriptions {
+		t.Fatalf("stored subscriptions = %d, want %d", len(got), maxSubscriptions)
 	}
 }
 
