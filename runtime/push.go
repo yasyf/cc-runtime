@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"log"
+	"regexp"
 	"time"
 
 	"github.com/yasyf/synckit/hostregistry"
@@ -17,6 +18,18 @@ const pushTimeout = 30 * time.Second
 // routeTimeout bounds one background presence-routing attempt: the peer presence
 // walk over ssh plus the surface on the chosen peer.
 const routeTimeout = 30 * time.Second
+
+// deviceTokenPattern matches a ≥64-char lowercase-hex run — the shape of an
+// APNs device token, a delivery credential that must never log in full.
+var deviceTokenPattern = regexp.MustCompile("[0-9a-f]{64,}")
+
+// redactDeviceTokens scrubs token-shaped runs from a lane error's message
+// before it logs — the last line of defense under the senders' own redaction.
+func redactDeviceTokens(msg string) string {
+	return deviceTokenPattern.ReplaceAllStringFunc(msg, func(m string) string {
+		return m[:8] + "…"
+	})
+}
 
 // pushSender is one delivery lane fanning a frame out to its registered
 // endpoints: Web Push subscriptions, APNs device tokens.
@@ -77,7 +90,7 @@ func (f pushFanout) deliver(p access.PushPayload) {
 			ctx, cancel := context.WithTimeout(ctx, pushTimeout)
 			defer cancel()
 			if err := s.Fanout(ctx, p); err != nil {
-				log.Printf("[%s] push fanout: %v", interaction.AppName, err)
+				log.Printf("[%s] push fanout: %s", interaction.AppName, redactDeviceTokens(err.Error()))
 			}
 		})
 	}

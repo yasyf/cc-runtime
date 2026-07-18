@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -202,5 +203,22 @@ func TestPushFanoutLanesDeliverIndependently(t *testing.T) {
 	want := access.PushPayload{Type: interaction.EventNotification, Subject: "s1", Body: "done", Urgency: "normal"}
 	if len(got) != 1 || got[0] != want {
 		t.Fatalf("apns lane recorded %+v, want [%+v]", got, want)
+	}
+}
+
+// TestRedactDeviceTokensScrubsTokenShapedRuns pins the log line's last-line
+// defense: a token-shaped hex run in a lane error never logs in full.
+func TestRedactDeviceTokensScrubsTokenShapedRuns(t *testing.T) {
+	token := strings.Repeat("ab", 32)
+	msg := "apns: dial https://host/3/device/" + token + ": connection refused"
+	got := redactDeviceTokens(msg)
+	if strings.Contains(got, token) {
+		t.Fatalf("redactDeviceTokens(%q) = %q, want the full token scrubbed", msg, got)
+	}
+	if want := "apns: dial https://host/3/device/" + token[:8] + "…: connection refused"; got != want {
+		t.Fatalf("redactDeviceTokens = %q, want %q", got, want)
+	}
+	if benign := "reason InvalidProviderToken status 403 deadbeef"; redactDeviceTokens(benign) != benign {
+		t.Fatalf("redactDeviceTokens(%q) rewrote a non-token-shaped message", benign)
 	}
 }

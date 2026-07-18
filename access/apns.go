@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -241,7 +242,7 @@ func (a *APNSSender) send(ctx context.Context, body []byte, token, bearer, prior
 	req.Header.Set("Apns-Expiration", expiration)
 	resp, err := a.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("apns %s: %w", token, err)
+		return fmt.Errorf("apns %s: %s", redactToken(token), scrubbedCause(err, token))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusOK {
@@ -251,7 +252,33 @@ func (a *APNSSender) send(ctx context.Context, body []byte, token, bearer, prior
 	if resp.StatusCode == http.StatusGone || (resp.StatusCode == http.StatusBadRequest && reason == "BadDeviceToken") {
 		return a.pruneInvalidated(ctx, token, invalidatedAt)
 	}
-	return fmt.Errorf("apns %s: status %d reason %q", token, resp.StatusCode, reason)
+	return fmt.Errorf("apns %s: status %d reason %q", redactToken(token), resp.StatusCode, reason)
+}
+
+// redactToken abbreviates a device token for error strings: a registered token
+// is a delivery credential, so errors (and the logs they land in) carry only a
+// short prefix — and a token too short to spare one is elided entirely.
+func redactToken(token string) string {
+	const keep = 8
+	if len(token) <= keep {
+		return "…"
+	}
+	return token[:keep] + "…"
+}
+
+// scrubbedCause renders an error's message with every url.Error layer peeled
+// (each embeds the request URL, whose path is the token) and every remaining
+// occurrence of the full token redacted. The cause chain is deliberately cut:
+// a transport or append error can carry the URL or event payload verbatim.
+func scrubbedCause(err error, token string) string {
+	for {
+		var ue *url.Error
+		if !errors.As(err, &ue) {
+			break
+		}
+		err = ue.Err
+	}
+	return strings.ReplaceAll(err.Error(), token, redactToken(token))
 }
 
 // pruneInvalidated retires token unless it was re-registered after APNs
@@ -267,7 +294,7 @@ func (a *APNSSender) pruneInvalidated(ctx context.Context, token string, invalid
 			return nil
 		}
 		if err != nil {
-			return fmt.Errorf("read device token %s: %w", token, err)
+			return fmt.Errorf("read device token %s: %s", redactToken(token), scrubbedCause(err, token))
 		}
 		if createdAt > invalidatedAt {
 			return nil
@@ -304,10 +331,11 @@ func pruneDeviceToken(ctx context.Context, db *sql.DB, append daemon.AppendFunc,
 	if _, err := append(ctx, &event.Event{
 		SubjectID: PushSubjectID, Origin: event.OriginSystem, Type: EventPushDeviceUnregister, Payload: frame,
 	}); err != nil {
-		return fmt.Errorf("append device unregister %s: %w", token, err)
+		// The event payload carries the full token; an AppendFunc error can echo it.
+		return fmt.Errorf("append device unregister %s: %s", redactToken(token), scrubbedCause(err, token))
 	}
 	if _, err := db.ExecContext(ctx, `DELETE FROM apns_device_tokens WHERE token=?`, token); err != nil {
-		return fmt.Errorf("prune device token %s: %w", token, err)
+		return fmt.Errorf("prune device token %s: %s", redactToken(token), scrubbedCause(err, token))
 	}
 	return nil
 }

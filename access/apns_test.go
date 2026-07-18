@@ -5,10 +5,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path"
 	"path/filepath"
 	"strconv"
@@ -18,6 +20,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/yasyf/cc-interact/event"
 	"github.com/yasyf/cc-interact/store"
 )
 
@@ -522,14 +525,133 @@ func TestAPNSFanoutSurfacesOtherFailuresWithoutPruning(t *testing.T) {
 			f.register(token)
 
 			err := f.sender.Fanout(context.Background(), PushPayload{Type: "interaction.notification", Subject: "s1", Body: "hi"})
-			if err == nil || !strings.Contains(err.Error(), token) ||
+			if err == nil || !strings.Contains(err.Error(), token[:8]) ||
 				!strings.Contains(err.Error(), strconv.Itoa(tc.status)) || !strings.Contains(err.Error(), tc.reason) {
-				t.Fatalf("Fanout error = %v, want a failure naming %s, status %d, and reason %s", err, token, tc.status, tc.reason)
+				t.Fatalf("Fanout error = %v, want a failure naming the token prefix %s, status %d, and reason %s", err, token[:8], tc.status, tc.reason)
+			}
+			// The full device token is a delivery credential and must never ride
+			// the error string into logs.
+			if strings.Contains(err.Error(), token) {
+				t.Fatalf("Fanout error = %v, want the full device token redacted", err)
 			}
 			if got := f.tokens(); len(got) != 1 {
 				t.Fatalf("tokens after failure = %v, want the registration kept", got)
 			}
 		})
+	}
+}
+
+// erroringDoer fails every request the way http.Client does: a *url.Error whose
+// message embeds the request URL — and so the device token in its path.
+type erroringDoer struct{ err error }
+
+func (d erroringDoer) Do(req *http.Request) (*http.Response, error) {
+	return nil, &url.Error{Op: req.Method, URL: req.URL.String(), Err: d.err}
+}
+
+func TestAPNSFanoutTransportErrorRedactsToken(t *testing.T) {
+	f := newAPNSFixture(t)
+	token := deviceToken(0)
+	f.client.status[token] = http.StatusOK
+	f.register(token)
+	f.sender.client = erroringDoer{err: errors.New("connection reset")}
+
+	err := f.sender.Fanout(context.Background(), PushPayload{Type: "interaction.notification", Subject: "s1", Body: "hi"})
+	if err == nil || !strings.Contains(err.Error(), token[:8]) || !strings.Contains(err.Error(), "connection reset") {
+		t.Fatalf("Fanout error = %v, want the token prefix %s and the transport cause", err, token[:8])
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatalf("Fanout error = %v, want the full device token (via the url.Error URL) redacted", err)
+	}
+}
+
+// nestedURLErrorDoer fails every request with a url.Error nested inside another
+// url.Error — both layers embedding the request URL, and so the device token.
+type nestedURLErrorDoer struct{}
+
+func (nestedURLErrorDoer) Do(req *http.Request) (*http.Response, error) {
+	return nil, &url.Error{Op: req.Method, URL: req.URL.String(),
+		Err: &url.Error{Op: "Get", URL: req.URL.String(), Err: errors.New("connection reset")}}
+}
+
+func TestAPNSFanoutNestedURLErrorRedactsToken(t *testing.T) {
+	f := newAPNSFixture(t)
+	token := deviceToken(0)
+	f.client.status[token] = http.StatusOK
+	f.register(token)
+	f.sender.client = nestedURLErrorDoer{}
+
+	err := f.sender.Fanout(context.Background(), PushPayload{Type: "interaction.notification", Subject: "s1", Body: "hi"})
+	if err == nil || !strings.Contains(err.Error(), token[:8]) || !strings.Contains(err.Error(), "connection reset") {
+		t.Fatalf("Fanout error = %v, want the token prefix %s and the transport cause", err, token[:8])
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatalf("Fanout error = %v, want the full device token (nested url.Error) redacted", err)
+	}
+}
+
+// urlEchoingDoer fails with a bare error embedding the request URL without any
+// url.Error wrapper — the shape a proxy or middleware transport can produce.
+type urlEchoingDoer struct{}
+
+func (urlEchoingDoer) Do(req *http.Request) (*http.Response, error) {
+	return nil, fmt.Errorf("proxyconnect tcp: dial %s: connection refused", req.URL)
+}
+
+func TestAPNSFanoutRawURLCauseRedactsToken(t *testing.T) {
+	f := newAPNSFixture(t)
+	token := deviceToken(0)
+	f.client.status[token] = http.StatusOK
+	f.register(token)
+	f.sender.client = urlEchoingDoer{}
+
+	err := f.sender.Fanout(context.Background(), PushPayload{Type: "interaction.notification", Subject: "s1", Body: "hi"})
+	if err == nil || !strings.Contains(err.Error(), token[:8]) || !strings.Contains(err.Error(), "connection refused") {
+		t.Fatalf("Fanout error = %v, want the token prefix %s and the transport cause", err, token[:8])
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatalf("Fanout error = %v, want the full device token (raw URL cause) redacted", err)
+	}
+}
+
+// TestAPNSPruneAppendErrorRedactsToken covers the prune path: the unregister
+// event's payload carries the full token, so an AppendFunc error that echoes
+// its event must not carry the token downstream.
+func TestAPNSPruneAppendErrorRedactsToken(t *testing.T) {
+	f := newAPNSFixture(t)
+	token := deviceToken(0)
+	f.client.status[token] = http.StatusGone
+	f.client.reason[token] = "Unregistered"
+	f.register(token)
+	f.sender.append = func(_ context.Context, e *event.Event) (int64, error) {
+		return 0, fmt.Errorf("append rejected: %s", e.Payload)
+	}
+
+	err := f.sender.Fanout(context.Background(), PushPayload{Type: "interaction.notification", Subject: "s1", Body: "hi"})
+	if err == nil || !strings.Contains(err.Error(), "append device unregister") || !strings.Contains(err.Error(), token[:8]) {
+		t.Fatalf("Fanout error = %v, want an append-unregister failure naming the token prefix %s", err, token[:8])
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatalf("Fanout error = %v, want the full device token (via the event payload) redacted", err)
+	}
+}
+
+// TestAPNSShortTokenNeverRidesErrors pins redactToken's short-input contract: a
+// token at or under the prefix length is elided, never echoed verbatim.
+func TestAPNSShortTokenNeverRidesErrors(t *testing.T) {
+	f := newAPNSFixture(t)
+	const token = "ab12cd34"
+	if err := f.sender.Register(context.Background(), token, "ios"); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	f.sender.client = urlEchoingDoer{}
+
+	err := f.sender.Fanout(context.Background(), PushPayload{Type: "interaction.notification", Subject: "s1", Body: "hi"})
+	if err == nil || !strings.Contains(err.Error(), "connection refused") {
+		t.Fatalf("Fanout error = %v, want the transport cause", err)
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatalf("Fanout error = %v, want the short token elided, not echoed", err)
 	}
 }
 
