@@ -3,7 +3,9 @@ package mesh
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/yasyf/synckit/hostregistry"
 )
@@ -11,9 +13,11 @@ import (
 // AddHost registers target as a mesh peer in the shared registry and, unless
 // noRecurse, cross-registers this host on it over ssh. It verifies target is
 // reachable and has cc-runtime installed before persisting, then shells
-// `cc-runtime host add <self> --no-recurse` on the peer. self, when empty, is
-// detected via tailscale; a detection failure aborts, asking for --self. onStep
-// (may be nil) reports each step as it happens.
+// `cc-runtime host add <self> --no-recurse` on the peer. An inverse-registration
+// failure rolls the local registration back, so a failed add never leaves a
+// one-sided peering. self, when empty, is detected via tailscale; a detection
+// failure aborts, asking for --self. onStep (may be nil) reports each step as it
+// happens.
 func AddHost(ctx context.Context, r hostregistry.Runner, target, self string, noRecurse bool, onStep func(string)) error {
 	step := func(msg string) {
 		if onStep != nil {
@@ -42,7 +46,9 @@ func AddHost(ctx context.Context, r hostregistry.Runner, target, self string, no
 	}
 	step(Binary + " installed on " + target)
 
+	var hadHost bool
 	if _, err := Config.Update(ctx, func(g *hostregistry.Registry) error {
+		hadHost = slices.Contains(g.Hosts, target)
 		g.UpsertHost(target)
 		g.Self = self
 		return nil
@@ -57,7 +63,19 @@ func AddHost(ctx context.Context, r hostregistry.Runner, target, self string, no
 	}
 
 	if _, err := r.SSH(ctx, target, Binary+" host add "+hostregistry.ShellQuote(self)+" --no-recurse"); err != nil {
-		return fmt.Errorf("register inverse host on %s: %w", target, err)
+		inverseErr := fmt.Errorf("register inverse host on %s: %w", target, err)
+		// Roll back only the added host entry; Self is this machine's idempotent
+		// identity. WithoutCancel: ctx expiring may be what failed the ssh.
+		if _, rbErr := Config.Update(context.WithoutCancel(ctx), func(g *hostregistry.Registry) error {
+			if !hadHost {
+				g.RemoveHost(target)
+			}
+			return nil
+		}); rbErr != nil {
+			return errors.Join(inverseErr, fmt.Errorf("roll back local registration of %s: %w", target, rbErr))
+		}
+		step("rolled back local registration of " + target)
+		return inverseErr
 	}
 	step("registered inverse host " + self + " on " + target)
 	return nil
