@@ -12,9 +12,12 @@ import Security
 /// PairPayload is the QR-encoded handshake `cc-runtime pair` renders:
 /// `{"v":1,"name":"…","urls":["https://…",…],"token":"…","fp":"…"}`. `urls` is an
 /// ordered candidate list (LAN HTTPS first, tailnet HTTPS when available); `fp` is
-/// the optional lowercase-hex SHA-256 of the self-signed LAN certificate's DER a
-/// client pins to authenticate the LAN leg. Decoding rejects any version but 1 up
-/// front, so an incompatible payload fails loudly at the boundary.
+/// the lowercase-hex SHA-256 of the self-signed LAN certificate's DER a client
+/// pins to authenticate the LAN leg. Decoding rejects any version but 1, any
+/// non-HTTPS URL, and an IP-literal URL with no fingerprint to pin — the producer
+/// always emits `fp` alongside its IP-literal LAN legs, so a payload missing it is
+/// tampered or corrupt. A hostname-only payload needs no fingerprint: that leg
+/// authenticates via system trust.
 public struct PairPayload: Decodable, Equatable, Sendable {
     public let version: Int
     public let name: String
@@ -47,12 +50,20 @@ public struct PairPayload: Decodable, Equatable, Sendable {
         urls = try container.decode([URL].self, forKey: .urls)
         token = try container.decode(String.self, forKey: .token)
         fingerprint = try container.decodeIfPresent(String.self, forKey: .fingerprint)
+        if let insecure = urls.first(where: { $0.scheme?.lowercased() != "https" }) {
+            throw PairError.insecureURL(insecure)
+        }
+        if urls.contains(where: EndpointProber.pins), (fingerprint ?? "").isEmpty {
+            throw PairError.missingFingerprint
+        }
     }
 }
 
 /// PairError is a rejected pairing payload.
 public enum PairError: Error, Equatable {
     case unsupportedVersion(Int)
+    case insecureURL(URL)
+    case missingFingerprint
 }
 
 /// Machine is a paired daemon the app remembers: a stable id (the Keychain account

@@ -28,12 +28,37 @@ struct PairingTests {
         }
     }
 
-    @Test("the fingerprint is optional: a payload without fp decodes with a nil fingerprint")
-    func pairPayloadFingerprintOptional() throws {
+    @Test("an IP-literal payload without fp is rejected: the LAN leg must pin")
+    func pairPayloadRejectsIPWithoutFingerprint() {
         let json = #"{"v":1,"name":"lan-only","urls":["https://10.0.0.2:25444"],"token":"t"}"#
+        #expect(throws: PairError.missingFingerprint) {
+            try JSONDecoder().decode(PairPayload.self, from: Data(json.utf8))
+        }
+    }
+
+    @Test("an IP-literal payload with an empty fp is rejected the same as a missing one")
+    func pairPayloadRejectsIPWithEmptyFingerprint() {
+        let json = #"{"v":1,"name":"lan-only","urls":["https://10.0.0.2:25444"],"token":"t","fp":""}"#
+        #expect(throws: PairError.missingFingerprint) {
+            try JSONDecoder().decode(PairPayload.self, from: Data(json.utf8))
+        }
+    }
+
+    @Test("a hostname-only payload without fp decodes: that leg uses system trust")
+    func pairPayloadHostnameNeedsNoFingerprint() throws {
+        let json = #"{"v":1,"name":"tailnet-only","urls":["https://mac.tail1a2b.ts.net:25443"],"token":"t"}"#
         let payload = try JSONDecoder().decode(PairPayload.self, from: Data(json.utf8))
         #expect(payload.fingerprint == nil)
-        #expect(payload.urls == [URL(string: "https://10.0.0.2:25444")].compactMap(\.self))
+        #expect(payload.urls == [URL(string: "https://mac.tail1a2b.ts.net:25443")].compactMap(\.self))
+    }
+
+    @Test("a payload carrying a non-HTTPS URL is rejected outright")
+    func pairPayloadRejectsInsecureURL() throws {
+        let insecure = try #require(URL(string: "http://192.168.1.5:25444"))
+        let json = #"{"v":1,"name":"mitm","urls":["http://192.168.1.5:25444"],"token":"t","fp":"ab12"}"#
+        #expect(throws: PairError.insecureURL(insecure)) {
+            try JSONDecoder().decode(PairPayload.self, from: Data(json.utf8))
+        }
     }
 
     @Test("a payload missing the token fails to decode")

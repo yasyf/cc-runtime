@@ -74,6 +74,10 @@ final class PairingModel {
         } catch let PairError.unsupportedVersion(version) {
             let message = "This pairing code is version \(version); update the app to pair with it."
             return .failure(PairFormError(message: message))
+        } catch PairError.insecureURL {
+            return .failure(PairFormError(message: "This pairing payload has a non-HTTPS address; refusing to pair with it."))
+        } catch PairError.missingFingerprint {
+            return .failure(PairFormError(message: "This pairing payload is missing its LAN certificate fingerprint; re-run cc-runtime pair."))
         } catch {
             return .failure(PairFormError(message: "That isn't a cc-runtime pairing payload."))
         }

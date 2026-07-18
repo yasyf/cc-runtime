@@ -85,6 +85,56 @@ struct ProberTests {
         #expect(await prober.probe() == nil)
     }
 
+    @Test("an http candidate is dropped: never probed, never handed the bearer")
+    func httpCandidateDropped() async throws {
+        let insecureHost = "stub-\(UUID().uuidString).test"
+        let secureHost = "stub-\(UUID().uuidString).test"
+        defer { StubURLProtocol.unregister(host: insecureHost); StubURLProtocol.unregister(host: secureHost) }
+
+        let insecureHit = SendableFlag()
+        StubURLProtocol.register(host: insecureHost) { _ in insecureHit.set(); return .json(200, #"{"subjects":[]}"#) }
+        StubURLProtocol.register(host: secureHost) { _ in .json(200, #"{"subjects":[]}"#) }
+
+        let insecure = try candidate("http://\(insecureHost):25444")
+        let secure = try candidate("https://\(secureHost):25443")
+        let prober = EndpointProber(candidates: [insecure, secure], bearerToken: "sekret")
+
+        #expect(await prober.probe()?.baseURL == secure.baseURL)
+        #expect(insecureHit.value == false)
+    }
+
+    @Test("a prober whose only candidate is http returns nil without sending a request")
+    func httpOnlyProberFindsNothing() async throws {
+        let host = "stub-\(UUID().uuidString).test"
+        defer { StubURLProtocol.unregister(host: host) }
+        let recorder = RequestRecorder()
+        StubURLProtocol.register(host: host) { request in
+            recorder.record(request)
+            return .json(200, #"{"subjects":[]}"#)
+        }
+
+        let prober = try EndpointProber(candidates: [candidate("http://\(host):25444")], bearerToken: "sekret")
+        #expect(await prober.probe() == nil)
+        #expect(recorder.requests.isEmpty)
+    }
+
+    @Test(
+        "a machine's IP-literal leg without a fingerprint — nil or empty — is dropped, never system-trusted",
+        arguments: [nil, ""] as [String?]
+    )
+    func unpinnableIPLegDropped(fingerprint: String?) throws {
+        let machine = try Machine(
+            name: "tampered",
+            urls: [
+                #require(URL(string: "https://10.0.0.2:25444")),
+                #require(URL(string: "https://mac.tail1a2b.ts.net:25443")),
+            ],
+            fingerprint: fingerprint
+        )
+        let candidates = EndpointProber.candidates(for: machine, probeTimeout: 1)
+        #expect(candidates.map(\.baseURL) == [URL(string: "https://mac.tail1a2b.ts.net:25443")])
+    }
+
     @Test("only IP-literal hosts are pinned; a hostname leg uses system trust")
     func pinsIPLiteralsOnly() throws {
         #expect(try EndpointProber.pins(#require(URL(string: "https://192.168.1.5:25444"))))

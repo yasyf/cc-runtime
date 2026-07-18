@@ -30,27 +30,44 @@ public actor EndpointProber {
     private let probeTimeout: TimeInterval
 
     /// Creates a prober over an explicit candidate list (session-per-URL already
-    /// resolved). Tests inject candidates whose sessions carry a stub URLProtocol.
+    /// resolved). Any candidate whose URL is not https is dropped up front — the
+    /// bearer token never rides a cleartext leg. Tests inject candidates whose
+    /// sessions carry a stub URLProtocol.
     public init(candidates: [Candidate], bearerToken: String?, probeTimeout: TimeInterval = 5) {
-        self.candidates = candidates
+        self.candidates = candidates.filter { $0.baseURL.scheme?.lowercased() == "https" }
         self.bearerToken = bearerToken
         self.probeTimeout = probeTimeout
     }
 
     /// Creates a prober for `machine`, resolving each candidate URL's TLS handling:
-    /// an IP-literal host (a self-signed LAN leg) pins to the machine fingerprint,
-    /// any other host uses system trust. `token` rides on the probe's Authorization
-    /// header.
+    /// an IP-literal host (a self-signed LAN leg) pins to the machine fingerprint —
+    /// with no fingerprint to pin, the IP-literal leg is dropped rather than handed
+    /// system trust — and any other host uses system trust. `token` rides on the
+    /// probe's Authorization header.
     public init(machine: Machine, token: String?, probeTimeout: TimeInterval = 5) {
-        let pinnedSession = machine.fingerprint.map { EndpointProber.pinnedSession(fingerprint: $0, timeout: probeTimeout) }
-        let systemSession = EndpointProber.systemSession(timeout: probeTimeout)
-        let candidates = machine.urls.map { url -> Candidate in
-            if let pinnedSession, EndpointProber.pins(url) {
+        self.init(
+            candidates: EndpointProber.candidates(for: machine, probeTimeout: probeTimeout),
+            bearerToken: token,
+            probeTimeout: probeTimeout
+        )
+    }
+
+    /// candidates resolves a machine's URLs into probe candidates: an IP-literal
+    /// host pins to the machine fingerprint (dropped when there is none — nil and
+    /// a persisted empty string are equally unpinnable), any other host uses
+    /// system trust.
+    static func candidates(for machine: Machine, probeTimeout: TimeInterval) -> [Candidate] {
+        let pinnedSession = machine.fingerprint.flatMap {
+            $0.isEmpty ? nil : Self.pinnedSession(fingerprint: $0, timeout: probeTimeout)
+        }
+        let systemSession = Self.systemSession(timeout: probeTimeout)
+        return machine.urls.compactMap { url in
+            if pins(url) {
+                guard let pinnedSession else { return nil }
                 return Candidate(baseURL: url, session: pinnedSession)
             }
             return Candidate(baseURL: url, session: systemSession)
         }
-        self.init(candidates: candidates, bearerToken: token, probeTimeout: probeTimeout)
     }
 
     /// probe walks the candidates in order and returns the first whose GET
