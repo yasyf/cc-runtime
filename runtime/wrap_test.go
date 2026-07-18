@@ -161,6 +161,32 @@ func TestAssembleWrapMergesDisallowedTools(t *testing.T) {
 	}
 }
 
+// TestAssembleWrapRejectsUnbalancedParens pins the fail-loud contract: an
+// unbalanced paren in a caller --disallowedTools value would otherwise swallow
+// every following separator and collapse deny entries into one malformed rule.
+// The error must never echo the value — it can carry secrets and main.go prints
+// it to stderr, so a leak lands in launcher logs.
+func TestAssembleWrapRejectsUnbalancedParens(t *testing.T) {
+	fakeExeOnPath(t, "claude")
+	const secret = "Authorization: Bearer sk-test-secret"
+	for _, tc := range []struct {
+		id, value string
+	}{
+		{"unclosed open paren", "Bash(git *," + secret},
+		{"stray close paren", "Bash)git *," + secret},
+	} {
+		t.Run(tc.id, func(t *testing.T) {
+			_, err := assembleWrap([]string{"claude", "--disallowedTools", tc.value}, nil)
+			if err == nil || err.Error() != "wrap: unbalanced parentheses in --disallowedTools value" {
+				t.Fatalf("err = %v, want the fixed value-free unbalanced-parentheses error", err)
+			}
+			if strings.Contains(err.Error(), secret) {
+				t.Fatalf("err = %v, want the caller value absent", err)
+			}
+		})
+	}
+}
+
 func TestAssembleWrapStopsAtOptionTerminator(t *testing.T) {
 	claude := fakeExeOnPath(t, "claude")
 	cases := []struct {

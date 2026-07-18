@@ -3,6 +3,7 @@ package runtime
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -13,8 +14,8 @@ import (
 )
 
 // runRPC executes the rpc command against the deps-resolved local daemon,
-// returning its stdout and any error.
-func runRPC(t *testing.T, args ...string) (string, error) {
+// feeding stdin (the only params channel) and returning its stdout and any error.
+func runRPC(t *testing.T, stdin string, args ...string) (string, error) {
 	t.Helper()
 	var out bytes.Buffer
 	c := rpcCmd(deps())
@@ -24,6 +25,7 @@ func runRPC(t *testing.T, args ...string) (string, error) {
 	c.SilenceErrors = true
 	c.SetOut(&out)
 	c.SetErr(&out)
+	c.SetIn(strings.NewReader(stdin))
 	c.SetArgs(args)
 	err := c.Execute()
 	return out.String(), err
@@ -35,7 +37,7 @@ func TestRPCAllowedOpRoundTrips(t *testing.T) {
 	e := newE2E(t)
 	subjectID := e.start()
 
-	out, err := runRPC(t, "interaction.list", "--json", `{"scope":"`+e2eScope+`"}`)
+	out, err := runRPC(t, `{"scope":"`+e2eScope+`"}`, "interaction.list", "--json", "-")
 	if err != nil {
 		t.Fatalf("rpc interaction.list: %v\n%s", err, out)
 	}
@@ -70,7 +72,7 @@ func TestRPCAllowedOpRoundTrips(t *testing.T) {
 func TestRPCMeshPresenceRoundTrips(t *testing.T) {
 	newE2E(t)
 
-	out, err := runRPC(t, string(mesh.OpPresence))
+	out, err := runRPC(t, "", string(mesh.OpPresence))
 	if err != nil {
 		t.Fatalf("rpc mesh.presence: %v\n%s", err, out)
 	}
@@ -98,8 +100,8 @@ func TestRPCSessionKeysDistinctSubjects(t *testing.T) {
 
 	notify := func(session string) string {
 		t.Helper()
-		out, err := runRPC(t, string(interaction.OpNotify),
-			"--cwd", e2eScope, "--session", session, "--json", `{"message":"needs you"}`)
+		out, err := runRPC(t, `{"message":"needs you"}`, string(interaction.OpNotify),
+			"--cwd", e2eScope, "--session", session, "--json", "-")
 		if err != nil {
 			t.Fatalf("rpc notify (%s): %v\n%s", session, err, out)
 		}
@@ -127,25 +129,18 @@ func TestRPCSessionKeysDistinctSubjects(t *testing.T) {
 }
 
 // TestRPCJSONFromStdin asserts `--json -` reads the params off stdin — the mesh
-// fan-out's leg, keeping payloads out of argv — and round-trips like a literal.
+// fan-out's leg, keeping payloads out of argv — and round-trips.
 func TestRPCJSONFromStdin(t *testing.T) {
 	e := newE2E(t)
 	subjectID := e.start()
 
-	var out bytes.Buffer
-	c := rpcCmd(deps())
-	c.SilenceUsage = true
-	c.SilenceErrors = true
-	c.SetOut(&out)
-	c.SetErr(&out)
-	c.SetIn(strings.NewReader(`{"scope":"` + e2eScope + `"}`))
-	c.SetArgs([]string{"interaction.list", "--json", "-"})
-	if err := c.Execute(); err != nil {
-		t.Fatalf("rpc --json -: %v\n%s", err, out.String())
+	out, err := runRPC(t, `{"scope":"`+e2eScope+`"}`, "interaction.list", "--json", "-")
+	if err != nil {
+		t.Fatalf("rpc --json -: %v\n%s", err, out)
 	}
 	var reply daemon.Reply
-	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &reply); err != nil {
-		t.Fatalf("parse raw reply: %v\n%s", err, out.String())
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &reply); err != nil {
+		t.Fatalf("parse raw reply: %v\n%s", err, out)
 	}
 	if !reply.OK {
 		t.Fatalf("reply not ok: %s", reply.Error)
@@ -167,41 +162,32 @@ func TestRPCJSONFromStdin(t *testing.T) {
 	}
 }
 
-// TestRPCInvalidStdinJSONRejected asserts malformed stdin params fail before any dial.
+// TestRPCInvalidStdinJSONRejected asserts malformed stdin params fail before any
+// dial with the exact length-only error — the payload can carry free-text answer
+// content and the error rides over ssh into logs.
 func TestRPCInvalidStdinJSONRejected(t *testing.T) {
-	var out bytes.Buffer
-	c := rpcCmd(deps())
-	c.SilenceUsage = true
-	c.SilenceErrors = true
-	c.SetOut(&out)
-	c.SetErr(&out)
-	c.SetIn(strings.NewReader("{not json"))
-	c.SetArgs([]string{"interaction.list", "--json", "-"})
-	err := c.Execute()
-	if err == nil || !strings.Contains(err.Error(), "not valid JSON") {
-		t.Fatalf("err = %v, want an invalid-JSON error", err)
+	const payload = `{not json, secret-answer-note`
+	out, err := runRPC(t, payload, "interaction.list", "--json", "-")
+	want := fmt.Sprintf("--json is not valid JSON (%d bytes)", len(payload))
+	if err == nil || err.Error() != want {
+		t.Fatalf("err = %v, want exactly %q", err, want)
 	}
-	if strings.TrimSpace(out.String()) != "" {
-		t.Fatalf("invalid stdin json wrote output: %s", out.String())
+	if strings.Contains(out, "secret-answer-note") || strings.TrimSpace(out) != "" {
+		t.Fatalf("invalid stdin json wrote output: %s", out)
 	}
 }
 
-// TestRPCOversizedStdinJSONRejected asserts stdin params over the cap fail before any dial.
+// TestRPCOversizedStdinJSONRejected asserts stdin params over the cap fail before
+// any dial with the exact length-only error.
 func TestRPCOversizedStdinJSONRejected(t *testing.T) {
-	var out bytes.Buffer
-	c := rpcCmd(deps())
-	c.SilenceUsage = true
-	c.SilenceErrors = true
-	c.SetOut(&out)
-	c.SetErr(&out)
-	c.SetIn(strings.NewReader(`"` + strings.Repeat("x", maxRPCStdinBytes-1) + `"`))
-	c.SetArgs([]string{"interaction.list", "--json", "-"})
-	err := c.Execute()
-	if err == nil || !strings.Contains(err.Error(), "exceeds 1048576 bytes") {
-		t.Fatalf("err = %v, want an over-cap stdin error", err)
+	out, err := runRPC(t, `"`+strings.Repeat("x", maxRPCStdinBytes-1)+`"`,
+		"interaction.list", "--json", "-")
+	const want = "--json from stdin exceeds 1048576 bytes"
+	if err == nil || err.Error() != want {
+		t.Fatalf("err = %v, want exactly %q", err, want)
 	}
-	if strings.TrimSpace(out.String()) != "" {
-		t.Fatalf("oversized stdin json wrote output: %s", out.String())
+	if strings.TrimSpace(out) != "" {
+		t.Fatalf("oversized stdin json wrote output: %s", out)
 	}
 }
 
@@ -210,7 +196,7 @@ func TestRPCOversizedStdinJSONRejected(t *testing.T) {
 func TestRPCDisallowedOpRefusedLocally(t *testing.T) {
 	for _, op := range []string{"guard-edit", "shutdown", "interaction.start"} {
 		t.Run(op, func(t *testing.T) {
-			out, err := runRPC(t, op)
+			out, err := runRPC(t, "", op)
 			if err == nil {
 				t.Fatalf("op %q was not refused", op)
 			}
@@ -224,13 +210,32 @@ func TestRPCDisallowedOpRefusedLocally(t *testing.T) {
 	}
 }
 
-// TestRPCInvalidJSONRejected asserts malformed --json fails before any dial.
-func TestRPCInvalidJSONRejected(t *testing.T) {
-	out, err := runRPC(t, "interaction.list", "--json", "{not json")
-	if err == nil || !strings.Contains(err.Error(), "not valid JSON") {
-		t.Fatalf("err = %v, want an invalid-JSON error", err)
-	}
-	if strings.TrimSpace(out) != "" {
-		t.Fatalf("invalid json wrote output: %s", out)
+// TestRPCLiteralJSONArgvRejected asserts the literal `--json <json>` argv form is
+// gone: a non-"-" value anywhere on argv is refused before any dial — even valid
+// JSON, and even when a repeated `--json -` would win a last-one-wins parse —
+// with the exact refusal, which never echoes the ps-visible value.
+func TestRPCLiteralJSONArgvRejected(t *testing.T) {
+	for _, tc := range []struct {
+		id   string
+		args []string
+	}{
+		{"valid json", []string{"--json", `{"notes":"secret-answer-note"}`}},
+		{"invalid json", []string{"--json", `{not json, secret-answer-note`}},
+		{"literal laundered by trailing stdin flag", []string{"--json", `{"notes":"secret-answer-note"}`, "--json", "-"}},
+		{"literal after stdin flag", []string{"--json", "-", "--json", `{"notes":"secret-answer-note"}`}},
+	} {
+		t.Run(tc.id, func(t *testing.T) {
+			out, err := runRPC(t, "", append([]string{"interaction.list"}, tc.args...)...)
+			const want = `--json accepts only "-": params ride stdin, never argv`
+			if err == nil || err.Error() != want {
+				t.Fatalf("err = %v, want exactly %q", err, want)
+			}
+			if strings.Contains(err.Error(), "secret-answer-note") {
+				t.Fatalf("refusal echoes the argv payload: %v", err)
+			}
+			if strings.TrimSpace(out) != "" {
+				t.Fatalf("literal --json wrote output: %s", out)
+			}
+		})
 	}
 }

@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -94,7 +95,11 @@ func assembleWrap(args, baseEnv []string) (wrapPlan, error) {
 	env := append([]string(nil), baseEnv...)
 	env = append(env, interaction.WrapEnvVar+"="+interaction.WrapSentinel)
 
-	return wrapPlan{path: path, argv: mergeWrapFlags(child, head), env: env}, nil
+	argv, err := mergeWrapFlags(child, head)
+	if err != nil {
+		return wrapPlan{}, err
+	}
+	return wrapPlan{path: path, argv: argv, env: env}, nil
 }
 
 // wrapHead reports how many leading argv tokens form the child's invocation head —
@@ -123,7 +128,7 @@ func wrapHead(args []string) (int, error) {
 // --append-system-prompt is last-wins, so a second flag would silently drop the
 // caller's prompt. Every other flag (--settings, --channels, --session-id) and the
 // positional prompt ride through untouched in their original order.
-func mergeWrapFlags(child []string, head int) []string {
+func mergeWrapFlags(child []string, head int) ([]string, error) {
 	tail := child[head:]
 
 	var disallowed []string
@@ -158,12 +163,16 @@ func mergeWrapFlags(child []string, head int) []string {
 		}
 	}
 
+	merged, err := mergeDisallowedTools(disallowed)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]string, 0, len(child)+4)
 	out = append(out, child[:head]...)
-	out = append(out, "--disallowedTools", mergeDisallowedTools(disallowed))
+	out = append(out, "--disallowedTools", merged)
 	out = append(out, "--append-system-prompt", mergeAppendPrompt(appendPrompt))
 	out = append(out, rest...)
-	return out
+	return out, nil
 }
 
 // splitWrapFlag splits a `--name=value` token into its parts; a `--name` token
@@ -181,29 +190,40 @@ func splitWrapFlag(tok string) (name, val string, inline bool) {
 
 // mergeDisallowedTools unions the caller's disallowed-tool values (each a comma- or
 // space-separated list, per claude) with wrap's own two, preserving first-seen order
-// and dropping duplicates.
-func mergeDisallowedTools(existing []string) string {
+// and dropping duplicates. A malformed caller value fails loud.
+func mergeDisallowedTools(existing []string) (string, error) {
 	seen := map[string]bool{}
 	var tools []string
-	add := func(list string) {
-		for _, t := range splitToolList(list) {
+	add := func(list string) error {
+		split, err := splitToolList(list)
+		if err != nil {
+			return err
+		}
+		for _, t := range split {
 			if !seen[t] {
 				seen[t] = true
 				tools = append(tools, t)
 			}
 		}
+		return nil
 	}
 	for _, e := range existing {
-		add(e)
+		if err := add(e); err != nil {
+			return "", err
+		}
 	}
-	add(wrapDisallowedTools)
-	return strings.Join(tools, ",")
+	if err := add(wrapDisallowedTools); err != nil {
+		return "", err
+	}
+	return strings.Join(tools, ","), nil
 }
 
 // splitToolList splits a comma- or space-separated tool list, keeping separators
 // inside parentheses as part of the matcher — `Bash(git *)` is one entry, per
-// claude's own list syntax.
-func splitToolList(list string) []string {
+// claude's own list syntax. Unbalanced parentheses error: silently swallowing
+// every following separator would collapse deny entries into one malformed rule.
+// The error never echoes the caller-controlled value — it lands in launcher logs.
+func splitToolList(list string) ([]string, error) {
 	var out []string
 	depth, start := 0, 0
 	for i, r := range list {
@@ -212,6 +232,9 @@ func splitToolList(list string) []string {
 			depth++
 		case ')':
 			depth--
+			if depth < 0 {
+				return nil, errors.New("wrap: unbalanced parentheses in --disallowedTools value")
+			}
 		case ',', ' ':
 			if depth == 0 {
 				if i > start {
@@ -221,10 +244,13 @@ func splitToolList(list string) []string {
 			}
 		}
 	}
+	if depth != 0 {
+		return nil, errors.New("wrap: unbalanced parentheses in --disallowedTools value")
+	}
 	if start < len(list) {
 		out = append(out, list[start:])
 	}
-	return out
+	return out, nil
 }
 
 // mergeAppendPrompt appends wrap's steer to the caller's system prompt so both
