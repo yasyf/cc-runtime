@@ -121,6 +121,14 @@ func (h handlers) handleAsk(hc daemon.HandlerCtx) daemon.Reply {
 	if err := json.Unmarshal(hc.Env.Body, &q); err != nil {
 		return daemon.Reply{OK: false, Error: "bad question body: " + err.Error()}
 	}
+	// An empty question would engage the edit gate on nothing the human can
+	// answer; refuse before any subject or event exists.
+	if q.Prompt == "" {
+		return daemon.Reply{OK: false, Error: "question prompt must not be empty"}
+	}
+	if len(q.Options) == 0 {
+		return daemon.Reply{OK: false, Error: "question must carry at least one option"}
+	}
 	sub, _, err := hc.Subjects.Start(hc.Ctx, hc.Window, hc.Scope, slugFor(hc.Scope, hc.Window.Session), Lifecycle, false)
 	if err != nil {
 		return daemon.Reply{OK: false, Error: err.Error()}
@@ -162,6 +170,9 @@ func (h handlers) handleNotify(hc daemon.HandlerCtx) daemon.Reply {
 	var n NotificationPayload
 	if err := json.Unmarshal(hc.Env.Body, &n); err != nil {
 		return daemon.Reply{OK: false, Error: "bad notification body: " + err.Error()}
+	}
+	if n.Message == "" {
+		return daemon.Reply{OK: false, Error: "notification message must not be empty"}
 	}
 	sub, _, err := hc.Subjects.Start(hc.Ctx, hc.Window, hc.Scope, slugFor(hc.Scope, hc.Window.Session), Lifecycle, false)
 	if err != nil {

@@ -58,6 +58,7 @@ func askToolSchema() map[string]any {
 			"options": map[string]any{
 				"type":        "array",
 				"description": "the choices, mirroring AskUserQuestion",
+				"minItems":    1,
 				"items": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -69,7 +70,7 @@ func askToolSchema() map[string]any {
 				},
 			},
 		},
-		"required": []string{"options"},
+		"required": []string{"prompt", "options"},
 	}
 }
 

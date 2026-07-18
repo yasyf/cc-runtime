@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -249,6 +250,45 @@ func TestHandleAskAppendsAwaitsAndProjects(t *testing.T) {
 	}
 	if len(pend.Questions) != 1 || pend.Questions[0].QuestionID != questionID || pend.Questions[0].Header != "deploy?" {
 		t.Fatalf("pending = %+v, want one question id %d header deploy?", pend.Questions, questionID)
+	}
+}
+
+// TestHandleAskRejectsEmptyPromptAndOptions pins the empty-shape guard: an
+// empty ask would engage the edit gate on nothing the human can answer.
+func TestHandleAskRejectsEmptyPromptAndOptions(t *testing.T) {
+	h := newHarness(t)
+	for _, tc := range []struct {
+		id   string
+		q    QuestionPayload
+		want string
+	}{
+		{"empty options", QuestionPayload{Prompt: "pick one"}, "option"},
+		{"empty prompt", QuestionPayload{Options: []Option{{Label: "yes"}}}, "prompt"},
+		{"empty everything", QuestionPayload{}, "prompt"},
+	} {
+		t.Run(tc.id, func(t *testing.T) {
+			r := h.do(h.agentEnv(OpAsk, tc.q))
+			if r.OK || !strings.Contains(r.Error, tc.want) {
+				t.Fatalf("ask reply = %+v, want a rejection naming the empty %s", r, tc.want)
+			}
+			if r.SubjectID != "" {
+				t.Fatalf("rejected ask still resolved subject %q", r.SubjectID)
+			}
+		})
+	}
+	if questions, _ := h.fanout.snapshot(); len(questions) != 0 {
+		t.Fatalf("rejected asks still fanned out: %+v", questions)
+	}
+}
+
+func TestHandleNotifyRejectsEmptyMessage(t *testing.T) {
+	h := newHarness(t)
+	r := h.do(h.agentEnv(OpNotify, NotificationPayload{}))
+	if r.OK || !strings.Contains(r.Error, "message") {
+		t.Fatalf("notify reply = %+v, want an empty-message rejection", r)
+	}
+	if _, notifications := h.fanout.snapshot(); len(notifications) != 0 {
+		t.Fatalf("rejected notify still fanned out: %+v", notifications)
 	}
 }
 

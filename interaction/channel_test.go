@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -159,6 +160,24 @@ func sampleArgs(t *testing.T) json.RawMessage {
 		t.Fatalf("marshal args: %v", err)
 	}
 	return b
+}
+
+// TestToolSchemasRejectEmptyShapes pins the schema constraints the harness
+// validates client-side: without them {"options":[]} and {"message":""} would
+// gate-block on nothing.
+func TestToolSchemasRejectEmptyShapes(t *testing.T) {
+	ask := askToolSchema()
+	if req := ask["required"].([]string); !slices.Contains(req, "prompt") || !slices.Contains(req, "options") {
+		t.Fatalf("ask required = %v, want prompt and options", req)
+	}
+	opts := ask["properties"].(map[string]any)["options"].(map[string]any)
+	if opts["minItems"] != 1 {
+		t.Fatalf("ask options minItems = %v, want 1", opts["minItems"])
+	}
+	notify := notifyToolSchema()
+	if req := notify["required"].([]string); !slices.Contains(req, "message") {
+		t.Fatalf("notify required = %v, want message", req)
+	}
 }
 
 func TestAskToolLongPollReturnsHumanAnswer(t *testing.T) {
