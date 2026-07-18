@@ -115,8 +115,8 @@ github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e h1:JVG44RsyaB9T2KIHavM
 github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e/go.mod h1:RbqR21r5mrJuqunuUZ/Dhy/avygyECGrLceyNeo4LiM=
 github.com/yasyf/cc-interact v0.9.1 h1:ukp6HHk2BZw49GnNfNyvS85EofKdN5+PYuYXpW9zPhE=
 github.com/yasyf/cc-interact v0.9.1/go.mod h1:RievdGL+pZaZ+yIUNz9Jfe3GQ30WwkanEjy6S+temoo=
-github.com/yasyf/synckit v0.17.0 h1:t8IKS1CW3EgXaTBFC2vs8IZ0yBOaGyMBOsTbsRCWuHU=
-github.com/yasyf/synckit v0.17.0/go.mod h1:ANvxMrvFuqvytqZ9sFw8KnGgm6JpZe8FS0L3GlRy5sc=
+github.com/yasyf/synckit v0.18.0 h1:CrTP9GiXWFaySpqRcRrgKb9aJzFToME+H0sGKoshPTE=
+github.com/yasyf/synckit v0.18.0/go.mod h1:ANvxMrvFuqvytqZ9sFw8KnGgm6JpZe8FS0L3GlRy5sc=
 github.com/yuin/goldmark v1.4.13/go.mod h1:6yULJ656Px+3vBD8DxQVa3kxgyrAnzto9xy5taEt/CY=
 github.com/yusufpapurcu/wmi v1.2.4 h1:zFUKzehAFReQwLys1b/iSMl+JQGSCSjtVqQn9bBrPo0=
 github.com/yusufpapurcu/wmi v1.2.4/go.mod h1:SBZ9tNy3G9/m5Oi98Zks0QjeHVDvuK0qfxQmPyzfmi0=
