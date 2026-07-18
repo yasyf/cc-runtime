@@ -90,6 +90,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   token; the pair/token and fingerprint-pinned TLS legs for phones and
   off-mesh browsers are unchanged, and with no mesh state the daemon behaves
   exactly as before.
+- `cc-runtime wrap` composes as a launcher prefix. `cc-runtime wrap -- <argv…>`
+  now merges its steering flags into an existing claude invocation instead of
+  only building one from scratch, so an orchestrator can prefix every spawn with
+  it. It strips the leading `--` separator, recognizes bare `claude` and `ccp
+  run` (which execs claude and forwards its args) and fails loud on any other
+  executable rather than guessing where flags belong, and injects
+  `--disallowedTools` and `--append-system-prompt` right after the invocation
+  head — ahead of any positional prompt. A flag the caller already carries is
+  merged, not duplicated: disallowed-tool lists are unioned honoring claude's own
+  syntax (the space form's variadic values, and matchers like `Bash(git *)` kept
+  whole), and wrap's steer is
+  folded into the caller's `--append-system-prompt` (claude's is last-wins, so a
+  second flag would drop the caller's prompt). The caller's `--settings`,
+  `--channels`, and `--session-id` ride through untouched, so an orchestrator's
+  own channel plugin still loads alongside cc-runtime's ask/notify tools.
 
 ### Security
 - Subscription registration is bounded. The body caps at 8 KiB, endpoint and

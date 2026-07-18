@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/spf13/cobra"
@@ -37,13 +39,15 @@ type wrapPlan struct {
 	env  []string
 }
 
-// WrapCmd is the `cc-runtime wrap <program> <args…>` passthrough: it hard-disables
-// the native AskUserQuestion/PushNotification on the child and steers it to the
-// cc-runtime ask/notify MCP tools, then replaces this process with the child via
-// syscall.Exec so the child inherits the TTY, signals, and environment.
+// WrapCmd is the `cc-runtime wrap [--] <claude|ccp run> <args…>` launcher: it
+// hard-disables the native AskUserQuestion/PushNotification on the child and steers
+// it to the cc-runtime ask/notify MCP tools, then syscall.Exec's the child so it
+// inherits the TTY, signals, and environment. `cc-runtime wrap -- <argv…>` composes
+// as a prefix on an orchestrated claude invocation, merging its steering flags into
+// that argv without clobbering the caller's own flags.
 func WrapCmd() *cobra.Command {
 	c := &cobra.Command{
-		Use:                "wrap [program] [args...]",
+		Use:                "wrap [--] <claude|ccp run> [args...]",
 		Short:              "Run claude with the native ask/notify tools disabled and steered to cc-runtime",
 		Args:               cobra.MinimumNArgs(1),
 		DisableFlagParsing: true,
@@ -59,27 +63,175 @@ func WrapCmd() *cobra.Command {
 }
 
 // assembleWrap builds the child program path, argv, and environment for a wrap
-// launch without exec'ing — the pure seam the unit test drives. args[0] is the
-// passthrough program (resolved via exec.LookPath), args[1:] are the user's own
-// claude args, which pass through unchanged. It appends the two steering flags
-// (--disallowedTools, --append-system-prompt) after the user's args, and mirrors
-// the WrapSentinel into CC_RUNTIME_WRAP in the returned environment.
+// launch without exec'ing — the pure seam the unit test drives. It strips a leading
+// "--" separator, recognizes the child launcher (bare claude, or `ccp run`),
+// resolves it via exec.LookPath, merges wrap's flags in after the invocation head,
+// and mirrors the WrapSentinel into CC_RUNTIME_WRAP. An unrecognized executable
+// fails loud.
 func assembleWrap(args, baseEnv []string) (wrapPlan, error) {
+	// cobra's DisableFlagParsing hands the launcher-form separator straight
+	// through, so `cc-runtime wrap -- <argv…>` arrives with a leading "--".
+	if len(args) > 0 && args[0] == "--" {
+		args = args[1:]
+	}
+	if len(args) == 0 {
+		return wrapPlan{}, fmt.Errorf("wrap: missing child command")
+	}
+
+	head, err := wrapHead(args)
+	if err != nil {
+		return wrapPlan{}, err
+	}
+
 	path, err := exec.LookPath(args[0])
 	if err != nil {
 		return wrapPlan{}, fmt.Errorf("wrap: resolve %q: %w", args[0], err)
 	}
 
-	argv := make([]string, 0, len(args)+4)
-	argv = append(argv, path)
-	argv = append(argv, args[1:]...)
-	argv = append(argv,
-		"--disallowedTools", wrapDisallowedTools,
-		"--append-system-prompt", wrapSteer,
-	)
+	child := append([]string(nil), args...)
+	child[0] = path
 
 	env := append([]string(nil), baseEnv...)
 	env = append(env, interaction.WrapEnvVar+"="+interaction.WrapSentinel)
 
-	return wrapPlan{path: path, argv: argv, env: env}, nil
+	return wrapPlan{path: path, argv: mergeWrapFlags(child, head), env: env}, nil
+}
+
+// wrapHead reports how many leading argv tokens form the child's invocation head —
+// the executable, plus a subcommand when the executable itself exec's claude. Wrap's
+// flags are injected immediately after the head so they reach claude ahead of any
+// positional prompt. Only claude and `ccp run` are recognized; wrap refuses to guess
+// where flags belong for any other launcher.
+func wrapHead(args []string) (int, error) {
+	switch filepath.Base(args[0]) {
+	case "claude":
+		return 1, nil
+	case "ccp":
+		if len(args) < 2 || args[1] != "run" {
+			return 0, fmt.Errorf("wrap: ccp child must be `ccp run …` (run exec's claude and forwards its args); got %q", strings.Join(args, " "))
+		}
+		return 2, nil
+	default:
+		return 0, fmt.Errorf("wrap: unrecognized child executable %q; wrap injects claude flags and only recognizes claude or `ccp run`", args[0])
+	}
+}
+
+// mergeWrapFlags folds wrap's --disallowedTools and --append-system-prompt into the
+// child argv without clobbering the caller's own flags. A managed flag the child
+// already carries is merged value-wise — disallowed tools are unioned, wrap's steer
+// is appended to the caller's system prompt — rather than duplicated: claude's
+// --append-system-prompt is last-wins, so a second flag would silently drop the
+// caller's prompt. Every other flag (--settings, --channels, --session-id) and the
+// positional prompt ride through untouched in their original order.
+func mergeWrapFlags(child []string, head int) []string {
+	tail := child[head:]
+
+	var disallowed []string
+	appendPrompt := ""
+	rest := make([]string, 0, len(tail))
+	for i := 0; i < len(tail); i++ {
+		if tail[i] == "--" {
+			rest = append(rest, tail[i:]...)
+			break
+		}
+		name, val, inline := splitWrapFlag(tail[i])
+		switch name {
+		case "--disallowedTools", "--disallowed-tools":
+			if inline {
+				disallowed = append(disallowed, val)
+				continue
+			}
+			// claude's flag is variadic (<tools...>): the space form owns every
+			// following token up to the next flag.
+			for i+1 < len(tail) && !strings.HasPrefix(tail[i+1], "-") {
+				i++
+				disallowed = append(disallowed, tail[i])
+			}
+		case "--append-system-prompt":
+			if !inline && i+1 < len(tail) && tail[i+1] != "--" {
+				i++
+				val = tail[i]
+			}
+			appendPrompt = val
+		default:
+			rest = append(rest, tail[i])
+		}
+	}
+
+	out := make([]string, 0, len(child)+4)
+	out = append(out, child[:head]...)
+	out = append(out, "--disallowedTools", mergeDisallowedTools(disallowed))
+	out = append(out, "--append-system-prompt", mergeAppendPrompt(appendPrompt))
+	out = append(out, rest...)
+	return out
+}
+
+// splitWrapFlag splits a `--name=value` token into its parts; a `--name` token
+// (value in the following argv element) reports inline false, and a non-flag token
+// reports itself as the name.
+func splitWrapFlag(tok string) (name, val string, inline bool) {
+	if !strings.HasPrefix(tok, "--") {
+		return tok, "", false
+	}
+	if i := strings.IndexByte(tok, '='); i >= 0 {
+		return tok[:i], tok[i+1:], true
+	}
+	return tok, "", false
+}
+
+// mergeDisallowedTools unions the caller's disallowed-tool values (each a comma- or
+// space-separated list, per claude) with wrap's own two, preserving first-seen order
+// and dropping duplicates.
+func mergeDisallowedTools(existing []string) string {
+	seen := map[string]bool{}
+	var tools []string
+	add := func(list string) {
+		for _, t := range splitToolList(list) {
+			if !seen[t] {
+				seen[t] = true
+				tools = append(tools, t)
+			}
+		}
+	}
+	for _, e := range existing {
+		add(e)
+	}
+	add(wrapDisallowedTools)
+	return strings.Join(tools, ",")
+}
+
+// splitToolList splits a comma- or space-separated tool list, keeping separators
+// inside parentheses as part of the matcher — `Bash(git *)` is one entry, per
+// claude's own list syntax.
+func splitToolList(list string) []string {
+	var out []string
+	depth, start := 0, 0
+	for i, r := range list {
+		switch r {
+		case '(':
+			depth++
+		case ')':
+			depth--
+		case ',', ' ':
+			if depth == 0 {
+				if i > start {
+					out = append(out, list[start:i])
+				}
+				start = i + 1
+			}
+		}
+	}
+	if start < len(list) {
+		out = append(out, list[start:])
+	}
+	return out
+}
+
+// mergeAppendPrompt appends wrap's steer to the caller's system prompt so both
+// survive in the single flag claude honors.
+func mergeAppendPrompt(existing string) string {
+	if existing == "" {
+		return wrapSteer
+	}
+	return existing + "\n\n" + wrapSteer
 }

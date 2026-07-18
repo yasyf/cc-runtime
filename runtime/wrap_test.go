@@ -10,10 +10,10 @@ import (
 	"github.com/yasyf/cc-runtime/interaction"
 )
 
-// fakeClaudeOnPath writes an executable named program into a temp dir and
-// prepends that dir to PATH for the test, so exec.LookPath resolves to it. It
-// returns the resolved absolute path the wrap argv[0] must equal.
-func fakeClaudeOnPath(t *testing.T, program string) string {
+// fakeExeOnPath writes an executable named program into a temp dir and prepends
+// that dir to PATH for the test, so exec.LookPath resolves to it. It returns the
+// resolved absolute path the wrap argv[0] must equal.
+func fakeExeOnPath(t *testing.T, program string) string {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, program)
@@ -24,8 +24,8 @@ func fakeClaudeOnPath(t *testing.T, program string) string {
 	return path
 }
 
-func TestAssembleWrapAppendsSteerFlagsAfterPassthroughArgs(t *testing.T) {
-	claude := fakeClaudeOnPath(t, "claude")
+func TestAssembleWrapInjectsSteerFlagsAfterHead(t *testing.T) {
+	claude := fakeExeOnPath(t, "claude")
 
 	plan, err := assembleWrap(
 		[]string{"claude", "--dangerously-skip-permissions"},
@@ -39,11 +39,13 @@ func TestAssembleWrapAppendsSteerFlagsAfterPassthroughArgs(t *testing.T) {
 		t.Fatalf("plan.path = %q, want the LookPath-resolved %q", plan.path, claude)
 	}
 
+	// Wrap's flags land immediately after the claude head, ahead of the caller's
+	// own args, so they precede any positional prompt.
 	want := []string{
 		claude,
-		"--dangerously-skip-permissions",
 		"--disallowedTools", "AskUserQuestion,PushNotification",
 		"--append-system-prompt", wrapSteer,
+		"--dangerously-skip-permissions",
 	}
 	if !slices.Equal(plan.argv, want) {
 		t.Fatalf("argv =\n  %#v\nwant\n  %#v", plan.argv, want)
@@ -54,10 +56,9 @@ func TestAssembleWrapAppendsSteerFlagsAfterPassthroughArgs(t *testing.T) {
 		t.Fatalf("wrapSteer missing WrapSentinel %q:\n%s", interaction.WrapSentinel, wrapSteer)
 	}
 
-	// The user's own claude args pass through unchanged and ahead of the appended
-	// steer flags.
-	if plan.argv[1] != "--dangerously-skip-permissions" {
-		t.Fatalf("passthrough arg = %q, want it unchanged at argv[1]", plan.argv[1])
+	// The caller's own arg survives unchanged.
+	if !slices.Contains(plan.argv, "--dangerously-skip-permissions") {
+		t.Fatalf("passthrough arg dropped; got %#v", plan.argv)
 	}
 
 	// The base environment propagates and the sentinel env var is appended.
@@ -70,42 +71,208 @@ func TestAssembleWrapAppendsSteerFlagsAfterPassthroughArgs(t *testing.T) {
 	}
 }
 
-// TestAssembleWrapExactChildArgvForReportedCase pins the precise child argv the
-// report calls out: `cc-runtime wrap claude --dangerously-skip-permissions`.
-func TestAssembleWrapExactChildArgvForReportedCase(t *testing.T) {
-	claude := fakeClaudeOnPath(t, "claude")
+// TestAssembleWrapStripsLauncherSeparator proves the composable launcher form
+// `cc-runtime wrap -- claude …` (cobra hands the leading "--" straight through
+// under DisableFlagParsing) assembles the same argv as the bare form.
+func TestAssembleWrapStripsLauncherSeparator(t *testing.T) {
+	fakeExeOnPath(t, "claude")
 
-	plan, err := assembleWrap([]string{"claude", "--dangerously-skip-permissions"}, nil)
+	withDash, err := assembleWrap([]string{"--", "claude", "-p", "hi"}, nil)
+	if err != nil {
+		t.Fatalf("assembleWrap with leading --: %v", err)
+	}
+	bare, err := assembleWrap([]string{"claude", "-p", "hi"}, nil)
+	if err != nil {
+		t.Fatalf("assembleWrap bare: %v", err)
+	}
+	if !slices.Equal(withDash.argv, bare.argv) {
+		t.Fatalf("leading -- changed the argv:\n  %#v\nvs\n  %#v", withDash.argv, bare.argv)
+	}
+}
+
+// TestAssembleWrapPreservesOrchestratorFlags pins the composed case: cc-orchestrate
+// spawns `claude --session-id … --channels … --settings … --append-system-prompt …
+// <prompt>`, and wrap must leave --settings, --channels, --session-id, and the
+// positional prompt intact while folding its own steering in — the brief survives
+// merged because claude's --append-system-prompt is last-wins.
+func TestAssembleWrapPreservesOrchestratorFlags(t *testing.T) {
+	claude := fakeExeOnPath(t, "claude")
+
+	settings := `{"hooks":{"SessionStart":[]}}`
+	plan, err := assembleWrap([]string{
+		"claude",
+		"--session-id", "sid-1",
+		"--channels", "chan-xyz",
+		"--settings", settings,
+		"--append-system-prompt", "ORCH-BRIEF",
+		"the task prompt",
+	}, nil)
 	if err != nil {
 		t.Fatalf("assembleWrap: %v", err)
 	}
 
-	// Everything but the steer string (which is long); assert structure + spelling.
-	if plan.argv[0] != claude {
-		t.Fatalf("argv[0] = %q, want %q", plan.argv[0], claude)
-	}
-	gotFlags := plan.argv[1:]
-	wantFlags := []string{
-		"--dangerously-skip-permissions",
+	want := []string{
+		claude,
 		"--disallowedTools", "AskUserQuestion,PushNotification",
-		"--append-system-prompt",
+		"--append-system-prompt", "ORCH-BRIEF\n\n" + wrapSteer,
+		"--session-id", "sid-1",
+		"--channels", "chan-xyz",
+		"--settings", settings,
+		"the task prompt",
 	}
-	if !slices.Equal(gotFlags[:len(wantFlags)], wantFlags) {
-		t.Fatalf("flags = %#v, want prefix %#v", gotFlags, wantFlags)
-	}
-	if gotFlags[len(wantFlags)] != wrapSteer {
-		t.Fatalf("--append-system-prompt value did not equal wrapSteer")
+	if !slices.Equal(plan.argv, want) {
+		t.Fatalf("argv =\n  %#v\nwant\n  %#v", plan.argv, want)
 	}
 }
 
-func TestAssembleWrapUnknownProgramErrorsLoudly(t *testing.T) {
-	// An empty PATH so the bogus program cannot resolve.
-	t.Setenv("PATH", "")
-	_, err := assembleWrap([]string{"definitely-not-a-real-binary-xyz"}, nil)
-	if err == nil {
-		t.Fatal("assembleWrap with an unresolvable program returned nil error, want a loud LookPath failure")
+func TestAssembleWrapMergesDisallowedTools(t *testing.T) {
+	cases := []struct {
+		id         string
+		flags      []string
+		want       string
+		wantPrompt string
+	}{
+		{"absent", nil, "AskUserQuestion,PushNotification", wrapSteer},
+		{"space-form", []string{"--disallowedTools", "Foo,Bar"}, "Foo,Bar,AskUserQuestion,PushNotification", wrapSteer},
+		{"equals-form", []string{"--disallowedTools=Foo"}, "Foo,AskUserQuestion,PushNotification", wrapSteer},
+		{"alias", []string{"--disallowed-tools", "Foo"}, "Foo,AskUserQuestion,PushNotification", wrapSteer},
+		{"already-present", []string{"--disallowedTools", "AskUserQuestion,Foo"}, "AskUserQuestion,Foo,PushNotification", wrapSteer},
+		{"space-separated-value", []string{"--disallowedTools", "Foo Bar"}, "Foo,Bar,AskUserQuestion,PushNotification", wrapSteer},
+		{"matcher-with-space", []string{"--disallowedTools", "Bash(git *)"}, "Bash(git *),AskUserQuestion,PushNotification", wrapSteer},
+		{"variadic-multi-token", []string{"--disallowedTools", "Foo", "Bar"}, "Foo,Bar,AskUserQuestion,PushNotification", wrapSteer},
+		{"variadic-stops-at-flag", []string{"--disallowedTools", "Foo", "--append-system-prompt", "P"}, "Foo,AskUserQuestion,PushNotification", "P\n\n" + wrapSteer},
 	}
-	if !strings.Contains(err.Error(), "definitely-not-a-real-binary-xyz") {
+	for _, tc := range cases {
+		t.Run(tc.id, func(t *testing.T) {
+			claude := fakeExeOnPath(t, "claude")
+			plan, err := assembleWrap(append([]string{"claude"}, tc.flags...), nil)
+			if err != nil {
+				t.Fatalf("assembleWrap: %v", err)
+			}
+			want := []string{
+				claude,
+				"--disallowedTools", tc.want,
+				"--append-system-prompt", tc.wantPrompt,
+			}
+			if !slices.Equal(plan.argv, want) {
+				t.Fatalf("argv =\n  %#v\nwant\n  %#v", plan.argv, want)
+			}
+		})
+	}
+}
+
+func TestAssembleWrapStopsAtOptionTerminator(t *testing.T) {
+	claude := fakeExeOnPath(t, "claude")
+	cases := []struct {
+		id    string
+		flags []string
+		want  []string
+	}{
+		{
+			"managed-flag-after-terminator",
+			[]string{"--", "--disallowedTools", "foo"},
+			[]string{
+				claude,
+				"--disallowedTools", "AskUserQuestion,PushNotification",
+				"--append-system-prompt", wrapSteer,
+				"--", "--disallowedTools", "foo",
+			},
+		},
+		{
+			"managed-flags-before-and-after-terminator",
+			[]string{
+				"--disallowedTools", "Foo",
+				"--",
+				"--disallowedTools", "Bar",
+				"--append-system-prompt", "positional prompt",
+			},
+			[]string{
+				claude,
+				"--disallowedTools", "Foo,AskUserQuestion,PushNotification",
+				"--append-system-prompt", wrapSteer,
+				"--",
+				"--disallowedTools", "Bar",
+				"--append-system-prompt", "positional prompt",
+			},
+		},
+		{
+			"positional-only-after-terminator",
+			[]string{"--", "somepositional"},
+			[]string{
+				claude,
+				"--disallowedTools", "AskUserQuestion,PushNotification",
+				"--append-system-prompt", wrapSteer,
+				"--", "somepositional",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.id, func(t *testing.T) {
+			plan, err := assembleWrap(append([]string{"claude"}, tc.flags...), nil)
+			if err != nil {
+				t.Fatalf("assembleWrap: %v", err)
+			}
+			if !slices.Equal(plan.argv, tc.want) {
+				t.Fatalf("argv =\n  %#v\nwant\n  %#v", plan.argv, tc.want)
+			}
+		})
+	}
+}
+
+// TestAssembleWrapCCPRunInjectsAfterSubcommand proves the `ccp run` launcher —
+// which exec's claude and forwards every later arg — gets wrap's flags after the
+// run subcommand, and the trailing claude flags survive.
+func TestAssembleWrapCCPRunInjectsAfterSubcommand(t *testing.T) {
+	ccp := fakeExeOnPath(t, "ccp")
+
+	plan, err := assembleWrap([]string{"ccp", "run", "--session-id", "sid-1"}, nil)
+	if err != nil {
+		t.Fatalf("assembleWrap: %v", err)
+	}
+
+	want := []string{
+		ccp, "run",
+		"--disallowedTools", "AskUserQuestion,PushNotification",
+		"--append-system-prompt", wrapSteer,
+		"--session-id", "sid-1",
+	}
+	if !slices.Equal(plan.argv, want) {
+		t.Fatalf("argv =\n  %#v\nwant\n  %#v", plan.argv, want)
+	}
+}
+
+func TestAssembleWrapFailsLoud(t *testing.T) {
+	cases := []struct {
+		id      string
+		args    []string
+		wantErr string
+	}{
+		{"empty-after-separator", []string{"--"}, "missing child command"},
+		{"unknown-executable", []string{"--", "bash", "-c", "echo hi"}, "unrecognized child executable"},
+		{"ccp-without-run", []string{"ccp", "status"}, "ccp run"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.id, func(t *testing.T) {
+			_, err := assembleWrap(tc.args, nil)
+			if err == nil {
+				t.Fatalf("assembleWrap(%#v) = nil error, want a loud failure", tc.args)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %v, want it to contain %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestAssembleWrapUnresolvableExecutableErrorsLoudly covers a recognized launcher
+// name that exec.LookPath cannot resolve.
+func TestAssembleWrapUnresolvableExecutableErrorsLoudly(t *testing.T) {
+	t.Setenv("PATH", "")
+	_, err := assembleWrap([]string{"claude"}, nil)
+	if err == nil {
+		t.Fatal("assembleWrap with an unresolvable claude returned nil error, want a loud LookPath failure")
+	}
+	if !strings.Contains(err.Error(), "claude") {
 		t.Fatalf("error = %v, want it to name the unresolved program", err)
 	}
 }
