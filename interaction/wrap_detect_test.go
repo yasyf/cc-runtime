@@ -49,7 +49,7 @@ func TestChannelToolsInstructionsPerWrapDetection(t *testing.T) {
 	t.Run("wrapped -> minimal instructions", func(t *testing.T) {
 		t.Setenv(WrapEnvVar, WrapSentinel)
 
-		tools, _, instructions, err := ChannelTools(context.Background(), session, scope, pid)
+		tools, _, instructions, err := ChannelTools(context.Background(), session, scope, pid, "dev")
 		if err != nil {
 			t.Fatalf("ChannelTools: %v", err)
 		}
@@ -62,7 +62,7 @@ func TestChannelToolsInstructionsPerWrapDetection(t *testing.T) {
 	t.Run("not wrapped -> full soft-steer instructions", func(t *testing.T) {
 		t.Setenv(WrapEnvVar, "")
 
-		tools, _, instructions, err := ChannelTools(context.Background(), session, scope, pid)
+		tools, _, instructions, err := ChannelTools(context.Background(), session, scope, pid, "dev")
 		if err != nil {
 			t.Fatalf("ChannelTools: %v", err)
 		}

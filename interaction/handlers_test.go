@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/yasyf/cc-interact/daemon"
-	"github.com/yasyf/cc-interact/paths"
+	"github.com/yasyf/daemonkit/paths"
 )
 
 // shortTempHome returns a short-pathed temp HOME so the daemon's unix socket
@@ -114,14 +114,21 @@ func newHarness(t *testing.T, tweaks ...func(*daemon.Config)) *harness {
 		}
 	})
 
-	client := daemon.NewClient(p.SocketPath())
 	deadline := time.Now().Add(5 * time.Second)
-	for !client.Available() {
+	var client *daemon.Client
+	for {
+		client, err = daemon.NewClient(context.Background(), daemon.ClientConfig{
+			Socket: p.SocketPath(), Build: cfg.Version,
+		})
+		if err == nil {
+			break
+		}
 		if time.Now().After(deadline) {
 			t.Fatal("daemon socket never became available")
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	t.Cleanup(func() { _ = client.Close() })
 	return &harness{t: t, client: client, paths: p, fanout: fanout}
 }
 

@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/yasyf/cc-interact/cmd"
+	dkdaemon "github.com/yasyf/daemonkit/daemon"
 
 	"github.com/yasyf/cc-runtime/access"
 )
@@ -97,9 +99,14 @@ func runAPNSSet(ctx context.Context, d cmd.Deps, out io.Writer, cfg access.APNSC
 // reloadDaemon restarts a running daemon so it re-reads the APNs config; when
 // none is running the next start picks it up.
 func reloadDaemon(ctx context.Context, d cmd.Deps) error {
-	client := d.NewClient()
-	if !client.Available() {
+	if err := d.EnsureCurrentIfRunning(ctx); errors.Is(err, dkdaemon.ErrNoPeer) {
 		return nil
+	} else if err != nil {
+		return err
+	}
+	client, err := d.NewClient(ctx)
+	if err != nil {
+		return err
 	}
 	return restartDaemon(ctx, d, client)
 }

@@ -3,12 +3,15 @@ package tui
 import (
 	"context"
 	"errors"
+	"os"
+	"syscall"
 	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/yasyf/cc-interact/daemon"
+	"github.com/yasyf/daemonkit/wire"
 	"github.com/yasyf/synckit/hostregistry"
 
 	"github.com/yasyf/cc-runtime/interaction"
@@ -556,7 +559,7 @@ func (m Model) resolveCmd() tea.Cmd {
 	client := m.client
 	return func() tea.Msg {
 		res, found, multiple, err := resolveAwaiting(context.Background(), client, scope)
-		if errors.Is(err, daemon.ErrDaemonUnavailable) {
+		if transientDaemonSwap(err) {
 			return resolveIdleMsg{}
 		}
 		if err != nil {
@@ -569,6 +572,21 @@ func (m Model) resolveCmd() tea.Cmd {
 			return multiAwaitingMsg{}
 		}
 		return clearWaitNoteMsg{}
+	}
+}
+
+func transientDaemonSwap(err error) bool {
+	var callErr *daemon.CallError
+	if !errors.As(err, &callErr) {
+		return false
+	}
+	switch callErr.Outcome {
+	case wire.Rejected, wire.PostSendFailure:
+		return true
+	case wire.PreSendFailure:
+		return errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ECONNREFUSED)
+	default:
+		return false
 	}
 }
 

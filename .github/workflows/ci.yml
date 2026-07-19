@@ -23,13 +23,6 @@ jobs:
         with:
           path: cc-runtime
 
-      # go.mod carries a temporary sibling replace for cc-interact
-      # (cc-notes 6f1b937); clone it next to this checkout.
-      - uses: actions/checkout@v4
-        with:
-          repository: yasyf/cc-interact
-          path: cc-interact
-
       - uses: actions/setup-go@v5
         with:
           go-version-file: cc-runtime/go.mod

@@ -13,7 +13,7 @@ import (
 
 	"github.com/yasyf/cc-interact/cmd"
 	"github.com/yasyf/cc-interact/daemon"
-	"github.com/yasyf/cc-interact/paths"
+	"github.com/yasyf/daemonkit/paths"
 
 	"github.com/yasyf/cc-runtime/access"
 )
@@ -170,7 +170,11 @@ func ensureDaemon(ctx context.Context, d cmd.Deps, tokenChanged bool, wantExtras
 	}
 	info := readHTTPInfo(d.Paths)
 	if needsRestart(info, tokenChanged, wantExtras) {
-		if err := restartDaemon(ctx, d, d.NewClient()); err != nil {
+		client, err := d.NewClient(ctx)
+		if err != nil {
+			return daemon.HTTPInfo{}, err
+		}
+		if err := restartDaemon(ctx, d, client); err != nil {
 			return daemon.HTTPInfo{}, err
 		}
 		info = readHTTPInfo(d.Paths)
@@ -192,14 +196,14 @@ func needsRestart(info daemon.HTTPInfo, tokenChanged bool, wantExtras int) bool 
 	return tokenChanged || effectiveBind(info.Bind) != access.BindLoopback || len(info.ExtraAddrs) != wantExtras
 }
 
-// restartDaemon steps the running daemon down, waits for it to release the
-// socket, then respawns one that re-reads the access config.
+// restartDaemon retires the running daemon session, then lets EnsureCurrent
+// replace it with an exact-build daemon that re-reads the access config.
 func restartDaemon(ctx context.Context, d cmd.Deps, client *daemon.Client) error {
-	if _, err := client.Shutdown(); err != nil {
+	if err := client.Shutdown(ctx); err != nil {
 		return fmt.Errorf("shut down daemon: %w", err)
 	}
-	if !client.WaitGone(daemon.UpgradeTimeout) {
-		return errors.New("daemon did not release the socket after shutdown")
+	if err := client.Close(); err != nil {
+		return fmt.Errorf("close daemon session: %w", err)
 	}
 	return d.EnsureCurrent(ctx)
 }

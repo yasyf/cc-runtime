@@ -64,14 +64,19 @@ func newE2E(t *testing.T) *e2e {
 		}
 	})
 
-	client := daemon.NewClient(interaction.AppPaths().SocketPath())
 	deadline := time.Now().Add(5 * time.Second)
-	for !client.Available() {
+	var client *daemon.Client
+	for {
+		client, err = launcher().NewClient(context.Background())
+		if err == nil {
+			break
+		}
 		if time.Now().After(deadline) {
 			t.Fatal("daemon socket never became available")
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	t.Cleanup(func() { _ = client.Close() })
 
 	// A read-only resolver over the daemon's own DB, mirroring buildServer's
 	// subject wiring, so the test can pull the exact subject.Subject the gate

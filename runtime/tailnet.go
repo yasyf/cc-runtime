@@ -8,7 +8,7 @@ import (
 	"os"
 
 	"github.com/yasyf/cc-interact/daemon"
-	"github.com/yasyf/cc-interact/paths"
+	"github.com/yasyf/daemonkit/paths"
 	"github.com/yasyf/synckit/meshtrust"
 )
 

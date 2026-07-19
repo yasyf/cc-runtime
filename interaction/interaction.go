@@ -10,8 +10,8 @@ import (
 	"encoding/hex"
 
 	"github.com/yasyf/cc-interact/daemon"
-	"github.com/yasyf/cc-interact/paths"
 	"github.com/yasyf/cc-interact/subject"
+	"github.com/yasyf/daemonkit/paths"
 )
 
 // AppName labels logs and user-facing daemon messages.

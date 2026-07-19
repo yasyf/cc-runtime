@@ -51,7 +51,11 @@ func TUICmd(d cmd.Deps) *cobra.Command {
 // TUI works whether the agent asks before or after the human opens it.
 func run(ctx context.Context, d cmd.Deps, scope string) error {
 	events := make(chan liveEvent, eventBuffer)
-	client := d.NewClient()
+	client, err := d.NewClient(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = client.Close() }()
 
 	model := NewModel(scope, client, events)
 	// Only a local subject has a reachable events plane; a remote one has no SSE and
@@ -66,7 +70,7 @@ func run(ctx context.Context, d cmd.Deps, scope string) error {
 	}
 
 	p := tea.NewProgram(model, tea.WithContext(ctx))
-	_, err := p.Run()
+	_, err = p.Run()
 	return err
 }
 
@@ -95,7 +99,14 @@ func wireMesh(model *Model) error {
 // window), so the stream never self-terminates on window death.
 func streamInto(ctx context.Context, d cmd.Deps, scope string, res resolution, events chan<- liveEvent) {
 	defer close(events)
-	client := d.NewClient()
+	client, err := d.NewClient(ctx)
+	if err != nil {
+		if ctx.Err() == nil {
+			events <- liveEvent{Err: err}
+		}
+		return
+	}
+	defer func() { _ = client.Close() }()
 	src := consume.StreamSource{
 		Port:      res.HTTPPort,
 		SubjectID: res.SubjectID,
@@ -103,7 +114,7 @@ func streamInto(ctx context.Context, d cmd.Deps, scope string, res resolution, e
 		Paths:     d.Paths,
 		Refresh:   refreshPort(client, scope),
 	}
-	err := consume.ConsumeEvents(ctx, src, func(seq int64, data string) (bool, error) {
+	err = consume.ConsumeEvents(ctx, src, func(seq int64, data string) (bool, error) {
 		typ := eventType(data)
 		switch typ {
 		case interaction.EventQuestion, interaction.EventNotification:

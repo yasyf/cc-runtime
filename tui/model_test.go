@@ -4,9 +4,12 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"syscall"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/yasyf/cc-interact/daemon"
+	"github.com/yasyf/daemonkit/wire"
 
 	"github.com/yasyf/cc-runtime/interaction"
 )
@@ -69,6 +72,29 @@ func newTestModel(subjectID string) Model {
 	m.resolved = true
 	m.res = resolution{SubjectID: subjectID, HTTPPort: 4321}
 	return m
+}
+
+func TestTransientDaemonSwap(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "rejected", err: &daemon.CallError{Outcome: wire.Rejected}, want: true},
+		{name: "post send failure", err: &daemon.CallError{Outcome: wire.PostSendFailure}, want: true},
+		{name: "missing socket", err: &daemon.CallError{Outcome: wire.PreSendFailure, Err: syscall.ENOENT}, want: true},
+		{name: "refused socket", err: &daemon.CallError{Outcome: wire.PreSendFailure, Err: syscall.ECONNREFUSED}, want: true},
+		{name: "other pre send failure", err: &daemon.CallError{Outcome: wire.PreSendFailure, Err: errors.New("bad frame")}},
+		{name: "ordinary error", err: errors.New("boom")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := transientDaemonSwap(tt.err); got != tt.want {
+				t.Fatalf("transientDaemonSwap() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }
 
 func TestUpdateStoresQuestionEvent(t *testing.T) {

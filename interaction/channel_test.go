@@ -56,14 +56,21 @@ func newChannelHarness(t *testing.T) *channelHarness {
 		}
 	})
 
-	client := daemon.NewClient(p.SocketPath())
 	deadline := time.Now().Add(5 * time.Second)
-	for !client.Available() {
+	var client *daemon.Client
+	for {
+		client, err = daemon.NewClient(context.Background(), daemon.ClientConfig{
+			Socket: p.SocketPath(), Build: "v0.0.0-test",
+		})
+		if err == nil {
+			break
+		}
 		if time.Now().After(deadline) {
 			t.Fatal("daemon socket never became available")
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	t.Cleanup(func() { _ = client.Close() })
 
 	r, err := client.Do(context.Background(), daemon.Envelope{Op: OpList, Scope: testScope})
 	if err != nil {
@@ -78,7 +85,7 @@ func newChannelHarness(t *testing.T) *channelHarness {
 
 func askTool(t *testing.T, session string, pid int) channel.Tool {
 	t.Helper()
-	tools, method, instructions, err := ChannelTools(context.Background(), session, testScope, pid)
+	tools, method, instructions, err := ChannelTools(context.Background(), session, testScope, pid, "v0.0.0-test")
 	if err != nil {
 		t.Fatalf("ChannelTools: %v", err)
 	}
@@ -186,7 +193,7 @@ func TestAskToolLongPollReturnsHumanAnswer(t *testing.T) {
 
 	go submitAnswerFor(t, h.client, "ship")
 
-	text, isErr := ask.Handler(context.Background(), sampleArgs(t))
+	text, isErr := ask.Handler(context.Background(), sampleArgs(t), func(string) {})
 	if isErr {
 		t.Fatalf("ask handler returned error: %q", text)
 	}
@@ -315,7 +322,7 @@ func TestAskToolSubjectKeyedToClaudePID(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		ask.Handler(context.Background(), sampleArgs(t))
+		ask.Handler(context.Background(), sampleArgs(t), func(string) {})
 	}()
 
 	subjectID := awaitingSubjectID(t, h.client, testScope)
@@ -353,7 +360,7 @@ func TestNoCrossWindowTheftWhileOwnerLives(t *testing.T) {
 	doneA := make(chan struct{})
 	go func() {
 		defer close(doneA)
-		askA.Handler(context.Background(), sampleArgs(t))
+		askA.Handler(context.Background(), sampleArgs(t), func(string) {})
 	}()
 	subjectA := awaitingSubjectID(t, h.client, theftScope)
 	if got := subjectClaudePID(t, subjectA); got != pidA {
@@ -406,7 +413,7 @@ func TestFreshWindowDoesNotInheritDeadOwnersAwaitingSubject(t *testing.T) {
 	doneA := make(chan struct{})
 	go func() {
 		defer close(doneA)
-		askA.Handler(context.Background(), sampleArgs(t))
+		askA.Handler(context.Background(), sampleArgs(t), func(string) {})
 	}()
 	subjectA := awaitingSubjectID(t, h.client, deadScope)
 	if got := subjectClaudePID(t, subjectA); got != pidA {
@@ -444,7 +451,7 @@ func TestFreshWindowDoesNotInheritDeadOwnersAwaitingSubject(t *testing.T) {
 // one window in a non-default scope.
 func askToolFor(t *testing.T, session string, pid int, scope string) channel.Tool {
 	t.Helper()
-	tools, _, _, err := ChannelTools(context.Background(), session, scope, pid)
+	tools, _, _, err := ChannelTools(context.Background(), session, scope, pid, "v0.0.0-test")
 	if err != nil {
 		t.Fatalf("ChannelTools: %v", err)
 	}

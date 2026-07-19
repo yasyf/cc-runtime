@@ -12,8 +12,9 @@ require (
 	github.com/mdp/qrterminal/v3 v3.2.1
 	github.com/shirou/gopsutil/v4 v4.26.5
 	github.com/spf13/cobra v1.10.2
-	github.com/yasyf/cc-interact v0.11.1
-	github.com/yasyf/synckit v0.19.0
+	github.com/yasyf/cc-interact v0.11.2-0.20260719051950-3cea78003d54
+	github.com/yasyf/daemonkit v0.1.1-0.20260719051422-e93fc1280567
+	github.com/yasyf/synckit v0.19.1-0.20260719052548-c01d9f3b0076
 	golang.org/x/net v0.57.0
 	modernc.org/sqlite v1.52.0
 )
@@ -56,7 +57,6 @@ require (
 	github.com/vishvananda/netlink v1.2.1-beta.2 // indirect
 	github.com/vishvananda/netns v0.0.0-20200728191858-db3c7e526aae // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
-	github.com/yasyf/daemonkit v0.1.0 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	golang.org/x/crypto v0.54.0 // indirect
 	golang.org/x/mod v0.37.0 // indirect

@@ -25,9 +25,9 @@ type answerReply struct {
 	Idled bool `json:"idled"`
 }
 
-func resolveAwaiting(c *cobra.Command, d cmd.Deps, scope string) (string, error) {
+func resolveAwaiting(c *cobra.Command, client *daemon.Client, scope string) (string, error) {
 	body, _ := json.Marshal(map[string]string{"scope": scope})
-	r, err := d.NewClient().Do(c.Context(), daemon.Envelope{Op: interaction.OpList, Scope: scope, Body: body})
+	r, err := client.Do(c.Context(), daemon.Envelope{Op: interaction.OpList, Scope: scope, Body: body})
 	if err != nil {
 		return "", err
 	}
@@ -57,9 +57,9 @@ func resolveAwaiting(c *cobra.Command, d cmd.Deps, scope string) (string, error)
 // caller can validate the answer against its options before submitting. When
 // want is non-zero it selects that question id from the pending set; otherwise it
 // requires exactly one open question.
-func resolveQuestion(c *cobra.Command, d cmd.Deps, scope, subjectID string, want int64) (interaction.PendingQuestion, error) {
+func resolveQuestion(c *cobra.Command, client *daemon.Client, scope, subjectID string, want int64) (interaction.PendingQuestion, error) {
 	body, _ := json.Marshal(map[string]string{"subject_id": subjectID})
-	r, err := d.NewClient().Do(c.Context(), daemon.Envelope{Op: interaction.OpPending, Scope: scope, Body: body})
+	r, err := client.Do(c.Context(), daemon.Envelope{Op: interaction.OpPending, Scope: scope, Body: body})
 	if err != nil {
 		return interaction.PendingQuestion{}, err
 	}
@@ -118,11 +118,16 @@ func AnswerCmd(d cmd.Deps) *cobra.Command {
 				return err
 			}
 			scope := mustCwd(cwd)
-			subjectID, err := resolveAwaiting(c, d, scope)
+			client, err := d.NewClient(c.Context())
 			if err != nil {
 				return err
 			}
-			pq, err := resolveQuestion(c, d, scope, subjectID, question)
+			defer func() { _ = client.Close() }()
+			subjectID, err := resolveAwaiting(c, client, scope)
+			if err != nil {
+				return err
+			}
+			pq, err := resolveQuestion(c, client, scope, subjectID, question)
 			if err != nil {
 				return err
 			}
@@ -141,7 +146,7 @@ func AnswerCmd(d cmd.Deps) *cobra.Command {
 				Other:      other,
 				Notes:      notes,
 			})
-			r, err := d.NewClient().Do(c.Context(), daemon.Envelope{Op: interaction.OpAnswer, Scope: scope, Body: body})
+			r, err := client.Do(c.Context(), daemon.Envelope{Op: interaction.OpAnswer, Scope: scope, Body: body})
 			if err != nil {
 				return err
 			}

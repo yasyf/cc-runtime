@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/yasyf/cc-interact/cmd"
-	"github.com/yasyf/cc-interact/daemon"
 
 	"github.com/yasyf/cc-runtime/interaction"
 )
@@ -15,10 +14,9 @@ import (
 // answerDeps builds a Deps that talks to the e2e daemon's socket with no
 // upgrade/launch side effects, so AnswerCmd runs against the live daemon.
 func (e *e2e) answerDeps() cmd.Deps {
-	client := e.client
 	return cmd.Deps{
 		Paths:         interaction.AppPaths(),
-		NewClient:     func() *daemon.Client { return client },
+		NewClient:     launcher().NewClient,
 		EnsureCurrent: func(context.Context) error { return nil },
 	}
 }

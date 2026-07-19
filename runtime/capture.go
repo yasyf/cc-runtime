@@ -133,11 +133,17 @@ func CaptureNotificationCmd(d cmd.Deps) *cobra.Command {
 				}
 				scope = wd
 			}
-			if err := d.EnsureCurrentIfRunning(); err != nil {
+			ctx := c.Context()
+			if err := d.EnsureCurrentIfRunning(ctx); err != nil {
 				return nil
 			}
 			body, _ := json.Marshal(interaction.NotificationPayload{Message: message})
-			_, _ = d.NewClient().Do(c.Context(), daemon.Envelope{
+			client, err := d.NewClient(ctx)
+			if err != nil {
+				return nil
+			}
+			defer func() { _ = client.Close() }()
+			_, _ = client.Do(ctx, daemon.Envelope{
 				Op:        interaction.OpCaptureNotification,
 				Session:   in.SessionID,
 				ClaudePID: d.ClaudePID(),
@@ -178,11 +184,17 @@ func CaptureAskCmd(d cmd.Deps) *cobra.Command {
 				}
 				scope = wd
 			}
-			if err := d.EnsureCurrentIfRunning(); err != nil {
+			ctx := c.Context()
+			if err := d.EnsureCurrentIfRunning(ctx); err != nil {
 				return nil
 			}
 			body, _ := json.Marshal(q)
-			_, _ = d.NewClient().Do(c.Context(), daemon.Envelope{
+			client, err := d.NewClient(ctx)
+			if err != nil {
+				return nil
+			}
+			defer func() { _ = client.Close() }()
+			_, _ = client.Do(ctx, daemon.Envelope{
 				Op:        interaction.OpCaptureQuestion,
 				Session:   in.SessionID,
 				ClaudePID: d.ClaudePID(),

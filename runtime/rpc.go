@@ -86,7 +86,12 @@ func rpcCmd(d cmd.Deps) *cobra.Command {
 			if len(body) > 0 && !json.Valid(body) {
 				return fmt.Errorf("--json is not valid JSON (%d bytes)", len(body))
 			}
-			r, err := d.NewClient().Do(c.Context(), daemon.Envelope{
+			client, err := d.NewClient(c.Context())
+			if err != nil {
+				return err
+			}
+			defer func() { _ = client.Close() }()
+			r, err := client.Do(c.Context(), daemon.Envelope{
 				Op:        op,
 				Session:   session,
 				ClaudePID: claudePID,
