@@ -127,12 +127,6 @@ struct SessionsView: View {
     @State private var deepLinkSubject: String?
     @State private var registeredTokenHex: String?
 
-    init(machine: Machine) {
-        self.machine = machine
-        let token = (try? TokenStore.token(machineID: machine.id)) ?? nil
-        _connection = State(initialValue: MachineConnection(machine: machine, token: token))
-    }
-
     init(machine: Machine, connection: MachineConnection) {
         self.machine = machine
         _connection = State(initialValue: connection)

@@ -154,14 +154,29 @@ public struct KeychainError: Error, Equatable {
     }
 }
 
+/// TokenStoreError reports a token that is absent from the v1 device-bound
+/// Keychain identity. Older or differently accessible secrets are never read or
+/// rewritten; transfer the token explicitly or forget and re-pair the machine.
+public enum TokenStoreError: Error, Equatable, LocalizedError {
+    case repairRequired(machineID: String)
+
+    public var errorDescription: String? {
+        switch self {
+        case let .repairRequired(machineID):
+            "No v1 device-bound token is available for machine \(machineID). " +
+                "Transfer its bearer token manually, or forget and re-pair the machine."
+        }
+    }
+}
+
 /// TokenStore keeps a machine's bearer token in the Keychain as a generic-password
 /// item under service `com.yasyf.cc-runtime`, keyed by the machine id. The calls
 /// are the portable SecItem surface, so they compile on macOS and iOS alike.
 public enum TokenStore {
     /// service is the Keychain service every token item shares.
-    public static let service = "com.yasyf.cc-runtime"
+    public static let service = "com.yasyf.cc-runtime.token.v1"
 
-    static let hardenedAccessibility = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String
+    static let accessibility = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String
 
     /// setToken writes (replacing any prior value) the token for `machineID`, pinned to
     /// the device-only accessibility class so it never migrates onto another device via
@@ -170,45 +185,43 @@ public enum TokenStore {
     public static func setToken(_ token: String, machineID: String) throws {
         let changes: [String: Any] = [
             kSecValueData as String: Data(token.utf8),
-            kSecAttrAccessible as String: hardenedAccessibility,
+            kSecAttrAccessible as String: accessibility,
         ]
         let updateStatus = SecItemUpdate(baseQuery(machineID) as CFDictionary, changes as CFDictionary)
-        if updateStatus == errSecSuccess { return }
+        if updateStatus == errSecSuccess {
+            return
+        }
         guard updateStatus == errSecItemNotFound else { throw KeychainError(status: updateStatus) }
         var attributes = baseQuery(machineID)
         attributes.merge(changes) { _, new in new }
         let addStatus = SecItemAdd(attributes as CFDictionary, nil)
-        if addStatus == errSecSuccess { return }
-        // A concurrent writer created the item between our update miss and this add;
-        // fold our value in with a final update rather than throwing a spurious dup.
+        if addStatus == errSecSuccess {
+            return
+        }
         guard addStatus == errSecDuplicateItem else { throw KeychainError(status: addStatus) }
         let retryStatus = SecItemUpdate(baseQuery(machineID) as CFDictionary, changes as CFDictionary)
-        guard retryStatus == errSecSuccess else { throw KeychainError(status: retryStatus) }
+        if retryStatus == errSecSuccess {
+            return
+        }
+        if retryStatus == errSecItemNotFound {
+            throw TokenStoreError.repairRequired(machineID: machineID)
+        }
+        throw KeychainError(status: retryStatus)
     }
 
-    /// token reads the token for `machineID`, or nil when none is stored. A legacy item
-    /// written before the device-only hardening is upgraded in place on read, so it is
-    /// no longer backup-migratable after its first read on a hardened build. The upgrade
-    /// is idempotent — an already-hardened item is never rewritten — and leaves the
-    /// stored value untouched.
-    public static func token(machineID: String) throws -> String? {
+    /// token reads the exact v1 device-bound token for `machineID`.
+    public static func token(machineID: String) throws -> String {
         var query = baseQuery(machineID)
         query[kSecReturnData as String] = true
-        query[kSecReturnAttributes as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         if status == errSecItemNotFound {
-            return nil
+            throw TokenStoreError.repairRequired(machineID: machineID)
         }
         guard status == errSecSuccess else { throw KeychainError(status: status) }
-        guard let item = result as? [String: Any],
-              let data = item[kSecValueData as String] as? Data
-        else {
+        guard let data = result as? Data else {
             throw KeychainError(status: errSecInternalError)
-        }
-        if needsUpgrade(item[kSecAttrAccessible as String]) {
-            try harden(machineID: machineID)
         }
         guard let token = String(data: data, encoding: .utf8) else {
             throw KeychainError(status: errSecDecode)
@@ -219,31 +232,6 @@ public enum TokenStore {
     /// deleteToken removes the token for `machineID`; a missing item is not an error.
     public static func deleteToken(machineID: String) throws {
         let status = SecItemDelete(baseQuery(machineID) as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw KeychainError(status: status)
-        }
-    }
-
-    // The accessibility classes an earlier build could have written that are NOT
-    // device-bound. Reading a token stored under one upgrades it in place to the
-    // hardened class; anything already device-bound — including a stricter class —
-    // is left as-is, so the migration only ever tightens, never loosens.
-    static let migratableAccessibilityClasses: Set<String> = [
-        kSecAttrAccessibleWhenUnlocked as String,
-        kSecAttrAccessibleAfterFirstUnlock as String,
-    ]
-
-    static func needsUpgrade(_ accessibility: Any?) -> Bool {
-        guard let accessibility = accessibility as? String else { return false }
-        return migratableAccessibilityClasses.contains(accessibility)
-    }
-
-    // Best-effort, post-read migration: if the item was deleted out from under us
-    // between the read and here, there is nothing left to upgrade — that is not a
-    // failure of the read that already succeeded.
-    private static func harden(machineID: String) throws {
-        let attributes = [kSecAttrAccessible as String: hardenedAccessibility] as CFDictionary
-        let status = SecItemUpdate(baseQuery(machineID) as CFDictionary, attributes)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw KeychainError(status: status)
         }

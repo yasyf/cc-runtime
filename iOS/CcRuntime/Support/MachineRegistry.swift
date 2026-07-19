@@ -12,7 +12,7 @@ protocol MachineRegistry: Sendable {
     func load() throws -> [Machine]
     func add(_ machine: Machine, token: String) throws
     func remove(_ machine: Machine) throws
-    func token(for machineID: String) throws -> String?
+    func token(for machineID: String) throws -> String
 }
 
 /// KeychainMachineRegistry stores the roster in Application Support and each token in
@@ -34,7 +34,7 @@ struct KeychainMachineRegistry: MachineRegistry {
         try store().forget(id: machine.id)
     }
 
-    func token(for machineID: String) throws -> String? {
+    func token(for machineID: String) throws -> String {
         try TokenStore.token(machineID: machineID)
     }
 

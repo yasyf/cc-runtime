@@ -28,8 +28,11 @@ final class InMemoryMachineRegistry: MachineRegistry, @unchecked Sendable {
         tokens.removeValue(forKey: machine.id)
     }
 
-    func token(for machineID: String) throws -> String? {
-        tokens[machineID]
+    func token(for machineID: String) throws -> String {
+        guard let token = tokens[machineID] else {
+            throw TokenStoreError.repairRequired(machineID: machineID)
+        }
+        return token
     }
 }
 

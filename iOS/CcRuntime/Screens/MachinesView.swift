@@ -7,11 +7,12 @@ enum Reachability: Sendable {
     case unknown
     case reachable
     case unreachable
+    case repairRequired
 }
 
 /// ReachabilityProbe resolves whether a machine answers on any of its legs, given its
 /// token. Production races the kit's EndpointProber; tests inject a scripted result.
-typealias ReachabilityProbe = @Sendable (Machine, String?) async -> Bool
+typealias ReachabilityProbe = @Sendable (Machine, String) async -> Bool
 
 /// MachinesModel owns the paired-machine roster and a lightweight reachability probe
 /// per machine. The probe resolves the same candidate legs the connection uses, so a
@@ -22,6 +23,8 @@ final class MachinesModel {
     private(set) var machines: [Machine] = []
     private(set) var reachability: [String: Reachability] = [:]
     private(set) var loadError: String?
+    private(set) var tokens: [String: String] = [:]
+    private(set) var tokenErrors: [String: String] = [:]
 
     private let registry: any MachineRegistry
     private let probe: ReachabilityProbe
@@ -41,7 +44,19 @@ final class MachinesModel {
     /// load refreshes the roster from the registry.
     func load() {
         do {
-            machines = try registry.load()
+            let loaded = try registry.load()
+            var loadedTokens: [String: String] = [:]
+            var loadedTokenErrors: [String: String] = [:]
+            for machine in loaded {
+                do {
+                    loadedTokens[machine.id] = try registry.token(for: machine.id)
+                } catch {
+                    loadedTokenErrors[machine.id] = error.localizedDescription
+                }
+            }
+            machines = loaded
+            tokens = loadedTokens
+            tokenErrors = loadedTokenErrors
             loadError = nil
         } catch {
             loadError = "Couldn't load your machines."
@@ -69,14 +84,26 @@ final class MachinesModel {
         }
     }
 
-    /// probeOne resolves one machine's reachability; any failure reads as unreachable.
+    /// probeOne resolves one machine's reachability after its exact token is loaded.
     func probeOne(_ machine: Machine) async {
-        let token = (try? registry.token(for: machine.id)) ?? nil
+        guard let token = tokens[machine.id] else {
+            reachability[machine.id] = .repairRequired
+            return
+        }
         reachability[machine.id] = await probe(machine, token) ? .reachable : .unreachable
     }
 
     func reachability(of machine: Machine) -> Reachability {
         reachability[machine.id] ?? .unknown
+    }
+
+    func token(for machine: Machine) -> String? {
+        tokens[machine.id]
+    }
+
+    func tokenError(for machine: Machine) -> String {
+        tokenErrors[machine.id] ??
+            "Transfer this machine's bearer token into the v1 device-bound Keychain identity, or forget and re-pair it."
     }
 }
 
@@ -137,7 +164,14 @@ struct MachinesView: View {
             List {
                 ForEach(model.machines) { machine in
                     NavigationLink {
-                        SessionsView(machine: machine)
+                        if let token = model.token(for: machine) {
+                            SessionsView(
+                                machine: machine,
+                                connection: MachineConnection(machine: machine, token: token)
+                            )
+                        } else {
+                            TokenRepairView(machine: machine, message: model.tokenError(for: machine))
+                        }
                     } label: {
                         MachineRow(machine: machine, reachability: model.reachability(of: machine))
                     }
@@ -219,6 +253,9 @@ private struct MachineRow: View {
     }
 
     private var addressSummary: String {
+        if case .repairRequired = reachability {
+            return "Transfer token or forget and re-pair"
+        }
         guard let first = machine.urls.first else {
             return "no address"
         }
@@ -232,6 +269,22 @@ private struct MachineRow: View {
         case .unknown: .secondary
         case .reachable: .green
         case .unreachable: .red
+        case .repairRequired: .orange
         }
+    }
+}
+
+private struct TokenRepairView: View {
+    let machine: Machine
+    let message: String
+
+    var body: some View {
+        ContentUnavailableView {
+            Label("Token Transfer Required", systemImage: "key.slash")
+        } description: {
+            Text(message)
+        }
+        .navigationTitle(machine.name)
+        .navigationBarTitleDisplayMode(.inline)
     }
 }

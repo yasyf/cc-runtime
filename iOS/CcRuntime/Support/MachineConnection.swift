@@ -23,7 +23,7 @@ final class MachineConnection {
     }
 
     let machine: Machine
-    let token: String?
+    let token: String
 
     private(set) var state: State = .idle
     private(set) var apiClient: APIClient?
@@ -32,7 +32,7 @@ final class MachineConnection {
     private var restSession: URLSession?
     private var sseSession: URLSession?
 
-    init(machine: Machine, token: String?) {
+    init(machine: Machine, token: String) {
         self.machine = machine
         self.token = token
     }

@@ -5,30 +5,12 @@ import Testing
 
 @Suite("TokenStore")
 struct TokenStoreTests {
-    @Test(
-        "needsUpgrade fires only on a backup-migratable class, never a device-bound one",
-        arguments: [
-            (kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String, false),
-            (kSecAttrAccessibleWhenUnlocked as String, true),
-            (kSecAttrAccessibleAfterFirstUnlock as String, true),
-            (kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String, false),
-        ]
-    )
-    func needsUpgradeDecision(accessibility: String, expected: Bool) {
-        #expect(TokenStore.needsUpgrade(accessibility) == expected)
-    }
-
-    @Test("needsUpgrade leaves an unreadable accessibility attribute untouched")
-    func needsUpgradeMissing() {
-        #expect(TokenStore.needsUpgrade(nil) == false)
-        #expect(TokenStore.needsUpgrade(42) == false)
-    }
-
     @Test("a written token round-trips and reads are idempotent")
     func roundTrip() throws {
         let machineID = uniqueMachineID()
         defer { try? TokenStore.deleteToken(machineID: machineID) }
 
+        #expect(TokenStore.service == "com.yasyf.cc-runtime.token.v1")
         try TokenStore.setToken("secret-abc", machineID: machineID)
         #expect(try TokenStore.token(machineID: machineID) == "secret-abc")
         #expect(try TokenStore.token(machineID: machineID) == "secret-abc")
@@ -44,19 +26,26 @@ struct TokenStoreTests {
         #expect(try TokenStore.token(machineID: machineID) == "second")
     }
 
-    @Test("reading a legacy item (written with no accessibility class) preserves the token")
-    func readsLegacyItemWithoutLoss() throws {
+    @Test("a pre-v1 token requires explicit transfer and is never rewritten")
+    func rejectsForeignIdentityWithoutMutation() throws {
         let machineID = uniqueMachineID()
-        defer { try? TokenStore.deleteToken(machineID: machineID) }
-        addLegacyItem(token: "legacy-token", machineID: machineID)
+        defer { deleteForeignItem(machineID: machineID) }
+        addForeignItem(token: "foreign-token", machineID: machineID)
 
-        #expect(try TokenStore.token(machineID: machineID) == "legacy-token")
-        #expect(try TokenStore.token(machineID: machineID) == "legacy-token")
+        #expect(throws: TokenStoreError.repairRequired(machineID: machineID)) {
+            try TokenStore.token(machineID: machineID)
+        }
+        try TokenStore.setToken("replacement", machineID: machineID)
+        #expect(try TokenStore.token(machineID: machineID) == "replacement")
+        #expect(readRawToken(machineID: machineID, service: legacyService) == "foreign-token")
     }
 
-    @Test("token is nil for a machine that was never paired")
-    func missingItemReturnsNil() throws {
-        #expect(try TokenStore.token(machineID: uniqueMachineID()) == nil)
+    @Test("an absent token requires an actionable manual transfer or re-pair")
+    func missingItemRequiresRepair() {
+        let machineID = uniqueMachineID()
+        #expect(throws: TokenStoreError.repairRequired(machineID: machineID)) {
+            try TokenStore.token(machineID: machineID)
+        }
     }
 
     @Test("deleteToken removes the item and is a no-op when nothing is stored")
@@ -64,7 +53,9 @@ struct TokenStoreTests {
         let machineID = uniqueMachineID()
         try TokenStore.setToken("bye", machineID: machineID)
         try TokenStore.deleteToken(machineID: machineID)
-        #expect(try TokenStore.token(machineID: machineID) == nil)
+        #expect(throws: TokenStoreError.repairRequired(machineID: machineID)) {
+            try TokenStore.token(machineID: machineID)
+        }
         try TokenStore.deleteToken(machineID: machineID)
     }
 
@@ -72,14 +63,41 @@ struct TokenStoreTests {
         "test-\(UUID().uuidString)"
     }
 
-    private func addLegacyItem(token: String, machineID: String) {
+    private func addForeignItem(token: String, machineID: String) {
         let attributes: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: TokenStore.service,
+            kSecAttrService as String: legacyService,
             kSecAttrAccount as String: machineID,
             kSecValueData as String: Data(token.utf8),
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlocked,
         ]
         SecItemDelete(attributes as CFDictionary)
         #expect(SecItemAdd(attributes as CFDictionary, nil) == errSecSuccess)
+    }
+
+    private func readRawToken(machineID: String, service: String) -> String? {
+        var query = identityQuery(machineID: machineID, service: service)
+        query[kSecReturnData as String] = true
+        var result: CFTypeRef?
+        #expect(SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess)
+        guard let data = result as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private func deleteForeignItem(machineID: String) {
+        try? TokenStore.deleteToken(machineID: machineID)
+        SecItemDelete(identityQuery(machineID: machineID, service: legacyService) as CFDictionary)
+    }
+
+    private func identityQuery(machineID: String, service: String) -> [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: machineID,
+        ]
+    }
+
+    private var legacyService: String {
+        "com.yasyf.cc-runtime"
     }
 }
