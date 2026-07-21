@@ -40,6 +40,8 @@ type Router struct {
 	// routing without the real console probe. NewRouter defaults it to the synckit
 	// presence read.
 	Attended func(context.Context) (bool, error)
+	// attemptTimeout is test-only injection for one peer probe or surface.
+	attemptTimeout time.Duration
 }
 
 // NewRouter builds a Router probing this host over local and dialing peers over
@@ -48,10 +50,17 @@ func NewRouter(local Runner, dial func(target string) Runner) Router {
 	return Router{Local: local, Dial: dial, Attended: localAttended}
 }
 
-// attemptTimeout bounds one peer probe or surface, so a wedged peer burns a
+// defaultAttemptTimeout bounds one peer probe or surface, so a wedged peer burns a
 // slice of the route budget rather than all of it — the failover to the next
-// attended peer still runs inside the caller's deadline. A var so tests shrink it.
-var attemptTimeout = 10 * time.Second
+// attended peer still runs inside the caller's deadline.
+const defaultAttemptTimeout = 10 * time.Second
+
+func (r Router) peerAttemptTimeout() time.Duration {
+	if r.attemptTimeout > 0 {
+		return r.attemptTimeout
+	}
+	return defaultAttemptTimeout
+}
 
 // localAttended reads this host's console attendance from the synckit presence
 // probe.
@@ -117,6 +126,7 @@ func (r Router) surfaceFirstAttended(ctx context.Context, reg *hostregistry.Regi
 	}
 	results := make(chan probed, n)
 	sem := make(chan struct{}, maxConcurrentHosts)
+	attemptTimeout := r.peerAttemptTimeout()
 	for i, h := range reg.Hosts {
 		go func(i int, h string) {
 			sem <- struct{}{}

@@ -222,9 +222,6 @@ func wedgeOrPresence(ctx context.Context, remoteCmd string) (string, error) {
 // hangs to its per-attempt deadline still leaves the next attended peer a live
 // context — the failover is not attempted with an already-cancelled context.
 func TestRouteWedgedSurfaceFallsOverWithLiveContext(t *testing.T) {
-	old := attemptTimeout
-	attemptTimeout = 50 * time.Millisecond
-	t.Cleanup(func() { attemptTimeout = old })
 	seedMesh(t, "me@origin", false, "u@wedged", "u@live")
 	live := attendedPeer()
 	r := Router{
@@ -235,7 +232,8 @@ func TestRouteWedgedSurfaceFallsOverWithLiveContext(t *testing.T) {
 			}
 			return wedgedSurfaceRunner{}
 		},
-		Attended: attendedFn(false),
+		Attended:       attendedFn(false),
+		attemptTimeout: 50 * time.Millisecond,
 	}
 	target, err := r.Route(context.Background(), "subj-13", "?")
 	if err != nil {
