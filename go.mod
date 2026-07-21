@@ -12,9 +12,9 @@ require (
 	github.com/mdp/qrterminal/v3 v3.2.1
 	github.com/shirou/gopsutil/v4 v4.26.5
 	github.com/spf13/cobra v1.10.2
-	github.com/yasyf/cc-interact v0.14.1-0.20260721021908-d3a0a7a9502b
-	github.com/yasyf/daemonkit v0.1.1-0.20260721044346-f090a23cf11f
-	github.com/yasyf/synckit v0.23.1-0.20260721024529-9b633bf21646
+	github.com/yasyf/cc-interact v0.15.0
+	github.com/yasyf/daemonkit v0.2.0
+	github.com/yasyf/synckit v0.24.0
 	golang.org/x/net v0.57.0
 	modernc.org/sqlite v1.52.0
 )
@@ -35,7 +35,6 @@ require (
 	github.com/ebitengine/purego v0.10.1 // indirect
 	github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
-	github.com/gofrs/flock v0.13.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.3.0 // indirect
