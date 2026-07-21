@@ -177,7 +177,9 @@ func ChannelTools(_ context.Context, session, scope string, pid int, build strin
 		Description: "Ask the human a question with structured options; remotely answerable and persisted for the session. Use this instead of the native AskUserQuestion. Blocks your edits until the human responds.",
 		InputSchema: askToolSchema(),
 		Handler: func(ctx context.Context, args json.RawMessage, _ func(string)) (string, bool) {
-			client, err := daemon.NewClient(ctx, daemon.ClientConfig{Socket: AppPaths().SocketPath(), Build: build})
+			client, err := daemon.NewClient(ctx, daemon.ClientConfig{
+				Socket: AppPaths().SocketPath(), Build: build, LifecycleBuild: build,
+			})
 			if err != nil {
 				return "ask failed: " + err.Error(), true
 			}
@@ -211,7 +213,9 @@ func ChannelTools(_ context.Context, session, scope string, pid int, build strin
 		Description: "Send the human a notification, delivered remotely to the web app or phone. Use this instead of PushNotification.",
 		InputSchema: notifyToolSchema(),
 		Handler: func(ctx context.Context, args json.RawMessage, _ func(string)) (string, bool) {
-			client, err := daemon.NewClient(ctx, daemon.ClientConfig{Socket: AppPaths().SocketPath(), Build: build})
+			client, err := daemon.NewClient(ctx, daemon.ClientConfig{
+				Socket: AppPaths().SocketPath(), Build: build, LifecycleBuild: build,
+			})
 			if err != nil {
 				return "notify failed: " + err.Error(), true
 			}

@@ -11,8 +11,10 @@ import (
 	"github.com/yasyf/cc-interact/daemon"
 	"github.com/yasyf/cc-interact/store"
 	"github.com/yasyf/cc-interact/subject"
+	"github.com/yasyf/daemonkit/daemonrole"
 
 	"github.com/yasyf/cc-runtime/interaction"
+	"github.com/yasyf/cc-runtime/version"
 )
 
 const (
@@ -28,6 +30,7 @@ type e2e struct {
 	t        *testing.T
 	client   *daemon.Client
 	resolver subject.Resolver
+	launcher daemon.Launcher
 }
 
 // shortTempHome returns a short-pathed temp HOME so the daemon's unix socket
@@ -43,11 +46,39 @@ func shortTempHome(t *testing.T) string {
 	return filepath.Clean(dir)
 }
 
+func testDaemonRole(t *testing.T) daemonrole.Classifier {
+	t.Helper()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return daemonrole.Classifier{RoleID: "com.yasyf.cc-runtime.test", RolePath: filepath.Clean(executable)}
+}
+
+func installTestRoleAlias(t *testing.T) {
+	t.Helper()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.Symlink(executable, filepath.Join(dir, "cc-runtime")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
 func newE2E(t *testing.T) *e2e {
 	t.Helper()
 	t.Setenv("HOME", shortTempHome(t))
+	installTestRoleAlias(t)
+	role := testDaemonRole(t)
+	testLauncher := daemon.Launcher{
+		Paths: interaction.AppPaths(), Version: version.Version, LifecycleBuild: version.Version,
+		DaemonRole: role,
+	}
 
-	s, err := buildServer(t.Context())
+	s, err := buildServer(t.Context(), role)
 	if err != nil {
 		t.Fatalf("buildServer: %v", err)
 	}
@@ -67,7 +98,7 @@ func newE2E(t *testing.T) *e2e {
 	deadline := time.Now().Add(5 * time.Second)
 	var client *daemon.Client
 	for {
-		client, err = launcher().NewClient(context.Background())
+		client, err = testLauncher.NewClient(context.Background())
 		if err == nil {
 			break
 		}
@@ -84,7 +115,7 @@ func newE2E(t *testing.T) *e2e {
 	resolver := subject.Resolver{
 		Store: store.NewSubjectStore(s.DB()),
 	}
-	return &e2e{t: t, client: client, resolver: resolver}
+	return &e2e{t: t, client: client, resolver: resolver, launcher: testLauncher}
 }
 
 func (e *e2e) do(env daemon.Envelope) daemon.Reply {

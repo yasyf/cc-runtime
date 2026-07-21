@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"regexp"
+	"sync"
 	"time"
 
 	"github.com/yasyf/synckit/hostregistry"
@@ -51,12 +52,19 @@ type interactionRouter interface {
 // peer when this host is unattended. Everything runs on the daemon lifecycle via
 // background (daemon.Server.Background).
 type pushFanout struct {
+	mu         sync.RWMutex
 	senders    []pushSender
 	background func(func(context.Context))
 	router     interactionRouter
 }
 
-func (f pushFanout) Question(subjectID string, q interaction.QuestionPayload) {
+func (f *pushFanout) setSenders(senders []pushSender) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.senders = append([]pushSender(nil), senders...)
+}
+
+func (f *pushFanout) Question(subjectID string, q interaction.QuestionPayload) {
 	f.deliver(access.PushPayload{
 		Type:    interaction.EventQuestion,
 		Subject: subjectID,
@@ -67,7 +75,7 @@ func (f pushFanout) Question(subjectID string, q interaction.QuestionPayload) {
 	f.route(subjectID, q.Header)
 }
 
-func (f pushFanout) Notification(subjectID string, n interaction.NotificationPayload) {
+func (f *pushFanout) Notification(subjectID string, n interaction.NotificationPayload) {
 	f.deliver(access.PushPayload{
 		Type:    interaction.EventNotification,
 		Subject: subjectID,
@@ -84,8 +92,11 @@ func (f pushFanout) Notification(subjectID string, n interaction.NotificationPay
 // cancels in-flight sends at shutdown, and the daemon drains them before
 // closing the store. One lane blocking to its deadline never delays or starves
 // another's delivery.
-func (f pushFanout) deliver(p access.PushPayload) {
-	for _, s := range f.senders {
+func (f *pushFanout) deliver(p access.PushPayload) {
+	f.mu.RLock()
+	senders := append([]pushSender(nil), f.senders...)
+	f.mu.RUnlock()
+	for _, s := range senders {
 		f.background(func(ctx context.Context) {
 			ctx, cancel := context.WithTimeout(ctx, pushTimeout)
 			defer cancel()
@@ -99,7 +110,7 @@ func (f pushFanout) deliver(p access.PushPayload) {
 // route surfaces the interaction on an attended peer off the handler's goroutine.
 // It is best-effort and additive: any error only logs, and the push lanes above
 // have already fired regardless of the routing outcome.
-func (f pushFanout) route(subjectID, header string) {
+func (f *pushFanout) route(subjectID, header string) {
 	if f.router == nil {
 		return
 	}

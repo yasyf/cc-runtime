@@ -138,7 +138,7 @@ func TestRacingAnswersConvergeOnDurableAnswer(t *testing.T) {
 	db := h.openDaemonDB()
 	ctx := context.Background()
 
-	st, err := store.Open(h.paths.DBPath(), nil)
+	st, err := store.Open(t.Context(), h.paths.DBPath(), nil)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

@@ -16,7 +16,7 @@ import (
 func (e *e2e) answerDeps() cmd.Deps {
 	return cmd.Deps{
 		Paths:         interaction.AppPaths(),
-		NewClient:     launcher().NewClient,
+		NewClient:     e.launcher.NewClient,
 		EnsureCurrent: func(context.Context) error { return nil },
 	}
 }

@@ -34,6 +34,8 @@ func newChannelHarness(t *testing.T) *channelHarness {
 		AppName:         AppName,
 		Paths:           p,
 		Version:         "v0.0.0-test",
+		LifecycleBuild:  "v0.0.0-test",
+		DaemonRole:      testDaemonRole(t),
 		ActiveStatuses:  ActiveStatuses,
 		Gate:            Gate(),
 		GateErrorReason: GateErrorReason,
@@ -60,7 +62,7 @@ func newChannelHarness(t *testing.T) *channelHarness {
 	var client *daemon.Client
 	for {
 		client, err = daemon.NewClient(context.Background(), daemon.ClientConfig{
-			Socket: p.SocketPath(), Build: "v0.0.0-test",
+			Socket: p.SocketPath(), Build: "v0.0.0-test", LifecycleBuild: "v0.0.0-test",
 		})
 		if err == nil {
 			break

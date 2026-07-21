@@ -1,7 +1,6 @@
 package interaction
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,7 +21,7 @@ type sessionsReply struct {
 // restServer holds the REST plane's shared state: the projection connection
 // and the Append chokepoint the answer route writes through.
 type restServer struct {
-	db     *sql.DB
+	server *daemon.Server
 	append daemon.AppendFunc
 }
 
@@ -31,7 +30,7 @@ type restServer struct {
 // wraps whole in its auth handler, so the loopback bypass and bearer-token
 // semantics apply to every route unchanged.
 func MountREST(s *daemon.Server) {
-	rs := &restServer{db: s.DB(), append: s.Append}
+	rs := &restServer{server: s, append: s.Append}
 	mux := s.Mux()
 	mux.HandleFunc("GET /api/sessions", rs.handleSessions)
 	mux.HandleFunc("GET /api/subjects/{id}/pending", rs.handlePending)
@@ -41,7 +40,7 @@ func MountREST(s *daemon.Server) {
 // handleSessions lists every active subject with its open-question count, so a
 // web client — which holds no scope — can pick one to open.
 func (rs *restServer) handleSessions(w http.ResponseWriter, r *http.Request) {
-	subjects, err := listSessions(r.Context(), rs.db)
+	subjects, err := listSessions(r.Context(), rs.server.DB())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -53,7 +52,7 @@ func (rs *restServer) handleSessions(w http.ResponseWriter, r *http.Request) {
 // 404ing an unknown subject rather than answering it with an empty set.
 func (rs *restServer) handlePending(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	known, err := subjectExists(r.Context(), rs.db, id)
+	known, err := subjectExists(r.Context(), rs.server.DB(), id)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -62,7 +61,7 @@ func (rs *restServer) handlePending(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown subject: "+id, http.StatusNotFound)
 		return
 	}
-	questions, err := openQuestions(r.Context(), rs.db, id)
+	questions, err := openQuestions(r.Context(), rs.server.DB(), id)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -111,7 +110,7 @@ func (rs *restServer) handleAnswer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.SubjectID = id
-	idled, err := applyAnswer(r.Context(), rs.db, rs.append, a)
+	idled, err := applyAnswer(r.Context(), rs.server.DB(), rs.append, a)
 	var unknown unknownQuestionError
 	switch {
 	case errors.As(err, &unknown):

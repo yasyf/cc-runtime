@@ -83,7 +83,7 @@ type apnsFixture struct {
 
 func newAPNSFixture(t *testing.T) *apnsFixture {
 	t.Helper()
-	st, err := store.Open(filepath.Join(t.TempDir(), "state.db"), func(ctx context.Context, db *sql.DB) error {
+	st, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "state.db"), func(ctx context.Context, db *sql.DB) error {
 		if err := PushMigrate(ctx, db); err != nil {
 			return err
 		}

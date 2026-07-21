@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/yasyf/cc-interact/daemon"
+	"github.com/yasyf/daemonkit/daemonrole"
 	"github.com/yasyf/daemonkit/paths"
 )
 
@@ -25,6 +26,15 @@ func shortTempHome(t *testing.T) string {
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	return filepath.Clean(dir)
+}
+
+func testDaemonRole(t *testing.T) daemonrole.Classifier {
+	t.Helper()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return daemonrole.Classifier{RoleID: "com.yasyf.cc-runtime.test", RolePath: filepath.Clean(executable)}
 }
 
 const (
@@ -86,6 +96,8 @@ func newHarness(t *testing.T, tweaks ...func(*daemon.Config)) *harness {
 		AppName:         "cc-runtime-test",
 		Paths:           p,
 		Version:         "v0.0.0-test",
+		LifecycleBuild:  "v0.0.0-test",
+		DaemonRole:      testDaemonRole(t),
 		ActiveStatuses:  ActiveStatuses,
 		Gate:            Gate(),
 		GateErrorReason: GateErrorReason,
@@ -118,7 +130,7 @@ func newHarness(t *testing.T, tweaks ...func(*daemon.Config)) *harness {
 	var client *daemon.Client
 	for {
 		client, err = daemon.NewClient(context.Background(), daemon.ClientConfig{
-			Socket: p.SocketPath(), Build: cfg.Version,
+			Socket: p.SocketPath(), Build: cfg.Version, LifecycleBuild: cfg.LifecycleBuild,
 		})
 		if err == nil {
 			break

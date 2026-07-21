@@ -68,7 +68,7 @@ type pushFixture struct {
 
 func newPushFixture(t *testing.T) *pushFixture {
 	t.Helper()
-	st, err := store.Open(filepath.Join(t.TempDir(), "state.db"), func(ctx context.Context, db *sql.DB) error {
+	st, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "state.db"), func(ctx context.Context, db *sql.DB) error {
 		if err := PushMigrate(ctx, db); err != nil {
 			return err
 		}
