@@ -16,10 +16,10 @@ import (
 // openDaemonDB opens a second connection to the harness daemon's on-disk
 // SQLite, the same source of truth the handlers write. Under WAL a second reader
 // sees every committed row, so a test can both inspect the event log and drive
-// the store functions directly against real, fully-migrated rows.
+// the store functions directly against the exact v1 schema.
 func (h *harness) openDaemonDB() *sql.DB {
 	h.t.Helper()
-	db, err := sql.Open("sqlite", h.paths.DBPath()+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)")
+	db, err := sql.Open("sqlite", store.Path(h.paths)+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)")
 	if err != nil {
 		h.t.Fatalf("open daemon db: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestRacingAnswersConvergeOnDurableAnswer(t *testing.T) {
 	db := h.openDaemonDB()
 	ctx := context.Background()
 
-	st, err := store.Open(t.Context(), h.paths.DBPath(), nil)
+	st, err := store.Open(t.Context(), store.Path(h.paths), StoreSchema)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

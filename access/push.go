@@ -17,12 +17,13 @@ import (
 	webpush "github.com/SherClockHolmes/webpush-go"
 	"github.com/yasyf/cc-interact/daemon"
 	"github.com/yasyf/cc-interact/event"
+	"github.com/yasyf/cc-interact/store"
 
 	"github.com/yasyf/cc-runtime/interaction"
 )
 
 // PushSubjectID is the well-known subject keying push-plane events (subscribe,
-// unsubscribe) on the daemon's event log. PushMigrate inserts its subjects row;
+// unsubscribe) on the daemon's event log. PushStoreSchema inserts its subjects row;
 // its scope and status sit outside every real window's, so it is never
 // resolved, adopted, or listed as an interaction subject.
 const PushSubjectID = "push"
@@ -59,38 +60,26 @@ const (
 // subscription set beyond maxSubscriptions.
 var ErrSubscriptionLimit = fmt.Errorf("subscription limit (%d) reached", maxSubscriptions)
 
-// pushSchema projects the current subscription set out of the push event log,
+// PushStoreSchema projects the current subscription set out of the push event log,
 // keyed by endpoint (the dedupe key); the log stays the durable record. The
-// well-known push subject the log rows reference is inserted by PushMigrate.
+// well-known push subject the log rows reference is inserted in the same exact
+// fresh-store transaction.
 // push_access records the grant surface (token hash + bind) the set was minted
 // under, so ReconcileGrants can revoke it when that surface is gone.
-const pushSchema = `
-CREATE TABLE IF NOT EXISTS push_subscriptions (
+var PushStoreSchema = store.Schema{DDL: `
+CREATE TABLE push_subscriptions (
   endpoint     TEXT PRIMARY KEY,
   subscription TEXT NOT NULL,
   created_at   INTEGER NOT NULL
 );
-CREATE TABLE IF NOT EXISTS push_access (
+CREATE TABLE push_access (
   id         INTEGER PRIMARY KEY CHECK (id = 1),
   token_hash TEXT NOT NULL,
   bind       TEXT NOT NULL
 );
-`
-
-// PushMigrate applies the push-plane schema on top of cc-interact's core and
-// inserts the well-known push subject the event log's foreign key requires.
-func PushMigrate(ctx context.Context, db *sql.DB) error {
-	if _, err := db.ExecContext(ctx, pushSchema); err != nil {
-		return fmt.Errorf("apply push schema: %w", err)
-	}
-	now := time.Now().UnixMilli()
-	if _, err := db.ExecContext(ctx,
-		`INSERT OR IGNORE INTO subjects(id, slug, scope, status, created_at, updated_at) VALUES(?,?,?,?,?,?)`,
-		PushSubjectID, PushSubjectID, PushSubjectID, PushSubjectID, now, now); err != nil {
-		return fmt.Errorf("insert push subject: %w", err)
-	}
-	return nil
-}
+INSERT INTO subjects(id, slug, scope, status, created_at, updated_at)
+VALUES('push', 'push', 'push', 'push', 0, 0);
+`}
 
 // PushPayload is the compact frame delivered (encrypted) to every push
 // endpoint: what happened (the wire event type), where (the subject), and the

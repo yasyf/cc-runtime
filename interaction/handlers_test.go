@@ -101,7 +101,7 @@ func newHarness(t *testing.T, tweaks ...func(*daemon.Config)) *harness {
 		ActiveStatuses:  ActiveStatuses,
 		Gate:            Gate(),
 		GateErrorReason: GateErrorReason,
-		Migrate:         Migrate,
+		StoreSchema:     StoreSchema,
 	}
 	for _, tweak := range tweaks {
 		tweak(&cfg)

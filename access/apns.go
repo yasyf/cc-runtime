@@ -19,6 +19,7 @@ import (
 
 	"github.com/yasyf/cc-interact/daemon"
 	"github.com/yasyf/cc-interact/event"
+	"github.com/yasyf/cc-interact/store"
 	"golang.org/x/net/http2"
 )
 
@@ -52,24 +53,16 @@ const devicePlatform = "ios"
 // device-token set beyond maxDeviceTokens.
 var ErrDeviceTokenLimit = fmt.Errorf("device token limit (%d) reached", maxDeviceTokens)
 
-// apnsSchema projects the current device-token set out of the push event log,
+// APNSStoreSchema projects the current device-token set out of the push event log,
 // keyed by token (the dedupe key); the log stays the durable record. It layers
-// on PushMigrate, which inserts the well-known push subject the rows reference.
-const apnsSchema = `
-CREATE TABLE IF NOT EXISTS apns_device_tokens (
+// on PushStoreSchema, which inserts the well-known push subject the rows reference.
+var APNSStoreSchema = store.Schema{DDL: `
+CREATE TABLE apns_device_tokens (
   token      TEXT PRIMARY KEY,
   platform   TEXT NOT NULL,
   created_at INTEGER NOT NULL
 );
-`
-
-// APNSMigrate applies the APNs registry schema on top of the push plane's.
-func APNSMigrate(ctx context.Context, db *sql.DB) error {
-	if _, err := db.ExecContext(ctx, apnsSchema); err != nil {
-		return fmt.Errorf("apply apns schema: %w", err)
-	}
-	return nil
-}
+`}
 
 // deviceRegistration is the wire frame a client POSTs to register its APNs
 // device token.

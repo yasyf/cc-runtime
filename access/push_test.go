@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
-	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -68,12 +67,8 @@ type pushFixture struct {
 
 func newPushFixture(t *testing.T) *pushFixture {
 	t.Helper()
-	st, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "state.db"), func(ctx context.Context, db *sql.DB) error {
-		if err := PushMigrate(ctx, db); err != nil {
-			return err
-		}
-		return APNSMigrate(ctx, db)
-	})
+	st, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "state.db"),
+		store.Compose(PushStoreSchema, APNSStoreSchema))
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}

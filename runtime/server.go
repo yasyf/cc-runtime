@@ -2,12 +2,12 @@ package runtime
 
 import (
 	"context"
-	"database/sql"
 	"net"
 
 	"github.com/yasyf/cc-interact/channel"
 	"github.com/yasyf/cc-interact/daemon"
 	"github.com/yasyf/cc-interact/sse"
+	"github.com/yasyf/cc-interact/store"
 	"github.com/yasyf/daemonkit/daemonrole"
 	"github.com/yasyf/synckit/meshtrust"
 
@@ -53,7 +53,7 @@ func buildServer(ctx context.Context, role daemonrole.Classifier) (*daemon.Serve
 		ActiveStatuses:    interaction.ActiveStatuses,
 		Gate:              interaction.Gate(),
 		GateErrorReason:   interaction.GateErrorReason,
-		Migrate:           migrate,
+		StoreSchema:       store.Compose(interaction.StoreSchema, access.PushStoreSchema, access.APNSStoreSchema),
 		PresenceEventType: conn.Type(),
 		OnPresenceChange:  conn.OnPresenceChange,
 		// The plain-HTTP plane never leaves loopback (the zero BindAddr);
@@ -119,18 +119,6 @@ func buildServer(ctx context.Context, role daemonrole.Classifier) (*daemon.Serve
 	fanout.background = s.Background
 	interaction.Register(s, fanout)
 	return s, nil
-}
-
-// migrate layers the interaction projection and the push-plane schema onto
-// cc-interact's core tables.
-func migrate(ctx context.Context, db *sql.DB) error {
-	if err := interaction.Migrate(ctx, db); err != nil {
-		return err
-	}
-	if err := access.PushMigrate(ctx, db); err != nil {
-		return err
-	}
-	return access.APNSMigrate(ctx, db)
 }
 
 func serve(ctx context.Context) error {

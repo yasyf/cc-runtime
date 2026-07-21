@@ -3,7 +3,6 @@ package access
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -83,12 +82,8 @@ type apnsFixture struct {
 
 func newAPNSFixture(t *testing.T) *apnsFixture {
 	t.Helper()
-	st, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "state.db"), func(ctx context.Context, db *sql.DB) error {
-		if err := PushMigrate(ctx, db); err != nil {
-			return err
-		}
-		return APNSMigrate(ctx, db)
-	})
+	st, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "state.db"),
+		store.Compose(PushStoreSchema, APNSStoreSchema))
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}

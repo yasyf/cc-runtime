@@ -13,6 +13,7 @@ import (
 	"github.com/yasyf/cc-interact/consume"
 	"github.com/yasyf/cc-interact/daemon"
 	"github.com/yasyf/cc-interact/event"
+	"github.com/yasyf/cc-interact/store"
 )
 
 // channelHarness runs a real daemon on cc-runtime's production state-dir layout
@@ -39,7 +40,7 @@ func newChannelHarness(t *testing.T) *channelHarness {
 		ActiveStatuses:  ActiveStatuses,
 		Gate:            Gate(),
 		GateErrorReason: GateErrorReason,
-		Migrate:         Migrate,
+		StoreSchema:     StoreSchema,
 	})
 	if err != nil {
 		t.Fatalf("daemon.New: %v", err)
@@ -276,7 +277,7 @@ func TestHumanAnswerNotSuppressedByExcludeAgentOrigin(t *testing.T) {
 // connection sees committed rows under WAL.
 func subjectClaudePID(t *testing.T, subjectID string) int {
 	t.Helper()
-	db, err := sql.Open("sqlite", AppPaths().DBPath()+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
+	db, err := sql.Open("sqlite", store.Path(AppPaths())+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 	if err != nil {
 		t.Fatalf("open daemon db: %v", err)
 	}
