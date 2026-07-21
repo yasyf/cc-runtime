@@ -13,7 +13,7 @@ require (
 	github.com/shirou/gopsutil/v4 v4.26.5
 	github.com/spf13/cobra v1.10.2
 	github.com/yasyf/cc-interact v0.15.0
-	github.com/yasyf/daemonkit v0.2.0
+	github.com/yasyf/daemonkit v0.3.0
 	github.com/yasyf/synckit v0.24.0
 	golang.org/x/net v0.57.0
 	modernc.org/sqlite v1.52.0
