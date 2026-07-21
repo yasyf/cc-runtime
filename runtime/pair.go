@@ -19,8 +19,8 @@ import (
 )
 
 // pairCmd exposes the daemon beyond loopback and prints a QR code a remote
-// client scans to pair. It restarts the daemon when its bind or token must
-// change.
+// client scans to pair. It restarts the daemon when its token or listener set
+// must change.
 func pairCmd(d cmd.Deps) *cobra.Command {
 	var resetToken, off bool
 	c := &cobra.Command{
@@ -162,13 +162,16 @@ func setBind(st access.Store, bind string) error {
 // ensureDaemon brings a current-version daemon serving wantExtras TLS legs
 // online and returns its published handshake. EnsureCurrent cold-starts an
 // absent daemon and upgrades a stale one; a live current daemon is then
-// restarted when its token, bind, or extra-listener set no longer matches
-// what pairing hands out.
+// restarted when its token or extra-listener set no longer matches what
+// pairing hands out.
 func ensureDaemon(ctx context.Context, d cmd.Deps, tokenChanged bool, wantExtras int) (daemon.HTTPInfo, error) {
 	if err := d.EnsureCurrent(ctx); err != nil {
 		return daemon.HTTPInfo{}, err
 	}
 	info := readHTTPInfo(d.Paths)
+	if err := validateSecureHTTPInfo(info); err != nil {
+		return daemon.HTTPInfo{}, err
+	}
 	if needsRestart(info, tokenChanged, wantExtras) {
 		client, err := d.NewClient(ctx)
 		if err != nil {
@@ -178,6 +181,9 @@ func ensureDaemon(ctx context.Context, d cmd.Deps, tokenChanged bool, wantExtras
 			return daemon.HTTPInfo{}, err
 		}
 		info = readHTTPInfo(d.Paths)
+		if err := validateSecureHTTPInfo(info); err != nil {
+			return daemon.HTTPInfo{}, err
+		}
 	}
 	if info.Port == 0 {
 		return daemon.HTTPInfo{}, errors.New("daemon did not publish its HTTP port")
@@ -188,12 +194,17 @@ func ensureDaemon(ctx context.Context, d cmd.Deps, tokenChanged bool, wantExtras
 	return info, nil
 }
 
-// needsRestart reports whether the running daemon no longer matches what
-// pairing will advertise: the token changed, the plain-HTTP plane strayed off
-// loopback (a legacy cleartext LAN bind), or the TLS leg count disagrees with
-// the target.
+// needsRestart reports whether the running daemon no longer matches the token
+// and TLS listener set pairing will advertise.
 func needsRestart(info daemon.HTTPInfo, tokenChanged bool, wantExtras int) bool {
-	return tokenChanged || effectiveBind(info.Bind) != access.BindLoopback || len(info.ExtraAddrs) != wantExtras
+	return tokenChanged || len(info.ExtraAddrs) != wantExtras
+}
+
+func validateSecureHTTPInfo(info daemon.HTTPInfo) error {
+	if effectiveBind(info.Bind) != access.BindLoopback {
+		return fmt.Errorf("daemon HTTP bind %q is not loopback", info.Bind)
+	}
+	return nil
 }
 
 // restartDaemon retires the running daemon session, then lets EnsureCurrent

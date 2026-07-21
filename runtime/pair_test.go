@@ -23,7 +23,6 @@ func TestNeedsRestart(t *testing.T) {
 		{"matching lan daemon reused", remote, false, 1, false},
 		{"matching lan+tailnet daemon reused", remoteTS, false, 2, false},
 		{"token change restarts", remote, true, 1, true},
-		{"legacy cleartext lan bind restarts", daemon.HTTPInfo{Port: 4100, Bind: access.BindLAN, ExtraAddrs: []string{"0.0.0.0:25444"}}, false, 1, true},
 		{"pairing a loopback daemon restarts", loopback, false, 1, true},
 		{"tailscale now available but no tailnet leg restarts", remote, false, 2, true},
 		{"tailscale gone but tailnet leg still up restarts", remoteTS, false, 1, true},
@@ -35,6 +34,13 @@ func TestNeedsRestart(t *testing.T) {
 				t.Errorf("needsRestart = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestValidateSecureHTTPInfoRejectsNonLoopbackBind(t *testing.T) {
+	info := daemon.HTTPInfo{Port: 4100, Bind: access.BindLAN, ExtraAddrs: []string{"0.0.0.0:25444"}}
+	if err := validateSecureHTTPInfo(info); err == nil {
+		t.Fatal("validateSecureHTTPInfo accepted non-loopback HTTP bind")
 	}
 }
 
