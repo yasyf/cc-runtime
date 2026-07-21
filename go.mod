@@ -14,7 +14,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/yasyf/cc-interact v0.14.1-0.20260721021908-d3a0a7a9502b
 	github.com/yasyf/daemonkit v0.1.1-0.20260721013056-c39154cdbd0a
-	github.com/yasyf/synckit v0.19.1-0.20260719052548-c01d9f3b0076
+	github.com/yasyf/synckit v0.23.1-0.20260721024529-9b633bf21646
 	golang.org/x/net v0.57.0
 	modernc.org/sqlite v1.52.0
 )
