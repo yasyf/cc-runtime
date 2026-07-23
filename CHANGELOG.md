@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `access.json` and `apns.json` now use exact schema-v1 envelopes with pinned
+  identities and fingerprints. Missing, stale, partial, or extended files fail
+  instead of receiving defaults or repair; explicit commands write complete
+  current state.
+
 ### Added
 - A machine mesh, built on synckit's shared host registry, not a
   cc-runtime-owned store. `cc-runtime host add <user@host>` verifies the peer

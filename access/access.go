@@ -10,7 +10,6 @@ package access
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -33,13 +32,16 @@ type Store struct {
 	Dir string
 }
 
-// Config is the persisted access-plane configuration. The zero value is the
-// loopback-only default, so an absent file yields it.
+// Config is the persisted access-plane configuration.
 type Config struct {
-	// Bind is the persisted remote-access switch. Empty means loopback only;
-	// "0.0.0.0" has the daemon serve the LAN/tailnet TLS listeners — the
+	// Bind is the persisted remote-access switch. "127.0.0.1" is loopback only;
+	// "0.0.0.0" has the daemon serve the LAN/tailnet TLS listeners. The
 	// plain-HTTP plane itself always binds loopback.
-	Bind string `json:"bind,omitempty"`
+	Bind string
+}
+
+type accessConfigPayload struct {
+	Bind *string `json:"bind"`
 }
 
 // ConfigPath is the access config file.
@@ -51,19 +53,27 @@ func (s Store) TokenPath() string { return filepath.Join(s.Dir, "token") }
 // CertDir holds the tailscale-provisioned TLS certificate and key.
 func (s Store) CertDir() string { return filepath.Join(s.Dir, "tls") }
 
-// ReadConfig loads the access config. An absent file is the loopback-only zero
-// value; a present-but-corrupt file fails loudly.
+// ReadConfig loads the exact persisted access configuration.
 func (s Store) ReadConfig() (Config, error) {
 	b, err := os.ReadFile(s.ConfigPath())
-	if errors.Is(err, fs.ErrNotExist) {
-		return Config{}, nil
-	}
 	if err != nil {
 		return Config{}, fmt.Errorf("read access config %q: %w", s.ConfigPath(), err)
 	}
-	var c Config
-	if err := json.Unmarshal(b, &c); err != nil {
-		return Config{}, fmt.Errorf("parse access config %q: %w", s.ConfigPath(), err)
+	payload, err := decodePersisted[accessConfigPayload](
+		b,
+		s.ConfigPath(),
+		accessConfigSchemaIdentity,
+		accessConfigSchemaFingerprint,
+	)
+	if err != nil {
+		return Config{}, err
+	}
+	if payload.Bind == nil {
+		return Config{}, fmt.Errorf("access config %q: payload.bind is required", s.ConfigPath())
+	}
+	c := Config{Bind: *payload.Bind}
+	if err := validateConfig(c); err != nil {
+		return Config{}, fmt.Errorf("access config %q: %w", s.ConfigPath(), err)
 	}
 	return c, nil
 }
@@ -71,15 +81,29 @@ func (s Store) ReadConfig() (Config, error) {
 // WriteConfig persists the access config (0600), creating the state dir if
 // needed.
 func (s Store) WriteConfig(c Config) error {
+	if err := validateConfig(c); err != nil {
+		return fmt.Errorf("access config %q: %w", s.ConfigPath(), err)
+	}
 	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
 		return err
 	}
-	b, err := json.Marshal(c)
+	b, err := encodePersisted(
+		accessConfigSchemaIdentity,
+		accessConfigSchemaFingerprint,
+		accessConfigPayload{Bind: &c.Bind},
+	)
 	if err != nil {
 		return err
 	}
 	if err := os.WriteFile(s.ConfigPath(), b, 0o600); err != nil {
 		return fmt.Errorf("write access config %q: %w", s.ConfigPath(), err)
+	}
+	return nil
+}
+
+func validateConfig(c Config) error {
+	if c.Bind != BindLoopback && c.Bind != BindLAN {
+		return fmt.Errorf("bind %q is invalid", c.Bind)
 	}
 	return nil
 }

@@ -145,18 +145,9 @@ func runPairOff(ctx context.Context, d cmd.Deps, out io.Writer) error {
 	return nil
 }
 
-// setBind persists the desired bind to the access config, a no-op when it
-// already matches.
+// setBind persists the complete desired access configuration.
 func setBind(st access.Store, bind string) error {
-	cfg, err := st.ReadConfig()
-	if err != nil {
-		return err
-	}
-	if cfg.Bind == bind {
-		return nil
-	}
-	cfg.Bind = bind
-	return st.WriteConfig(cfg)
+	return st.WriteConfig(access.Config{Bind: bind})
 }
 
 // ensureDaemon brings a current-version daemon serving wantExtras TLS legs

@@ -7,8 +7,10 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,12 +39,8 @@ func writeAPNSKey(t *testing.T) (string, *ecdsa.PrivateKey) {
 func TestAPNSConfigRoundTrip(t *testing.T) {
 	st := Store{Dir: t.TempDir()}
 
-	absent, err := st.ReadAPNSConfig()
-	if err != nil {
-		t.Fatalf("ReadAPNSConfig (absent): %v", err)
-	}
-	if absent.Enabled() {
-		t.Fatalf("absent config = %+v, want the disabled zero value", absent)
+	if _, err := st.ReadAPNSConfig(); err == nil {
+		t.Fatal("ReadAPNSConfig accepted an absent APNs config")
 	}
 
 	cfg := APNSConfig{KeyPath: "/keys/AuthKey_ABC123.p8", KeyID: "ABC123", TeamID: "TEAM99", BundleID: "com.example.cc", Sandbox: true}
@@ -55,6 +53,14 @@ func TestAPNSConfigRoundTrip(t *testing.T) {
 	}
 	if got := info.Mode().Perm(); got != 0o600 {
 		t.Fatalf("apns config mode = %o, want 600", got)
+	}
+	written, err := os.ReadFile(st.APNSConfigPath())
+	if err != nil {
+		t.Fatalf("read persisted apns config: %v", err)
+	}
+	want := `{"schema":"dev.yasyf.cc-runtime.apns","schemaVersion":1,"schemaFingerprint":"dev.yasyf.cc-runtime.apns.58cf93d92743c92c13f1134a9b38770877117f8c048e2b80b44980a0f7f436b1","payload":{"bundleId":"com.example.cc","keyId":"ABC123","keyPath":"/keys/AuthKey_ABC123.p8","sandbox":true,"teamId":"TEAM99"}}`
+	if string(written) != want {
+		t.Fatalf("persisted apns config = %s, want %s", written, want)
 	}
 	got, err := st.ReadAPNSConfig()
 	if err != nil {
@@ -77,19 +83,44 @@ func TestAPNSConfigRoundTrip(t *testing.T) {
 	if cleared.Enabled() {
 		t.Fatalf("cleared config = %+v, want the disabled zero value", cleared)
 	}
+	disabled, err := os.ReadFile(st.APNSConfigPath())
+	if err != nil {
+		t.Fatalf("read disabled apns config: %v", err)
+	}
+	wantDisabled := `{"schema":"dev.yasyf.cc-runtime.apns","schemaVersion":1,"schemaFingerprint":"dev.yasyf.cc-runtime.apns.58cf93d92743c92c13f1134a9b38770877117f8c048e2b80b44980a0f7f436b1","payload":{"bundleId":"","keyId":"","keyPath":"","sandbox":false,"teamId":""}}`
+	if string(disabled) != wantDisabled {
+		t.Fatalf("disabled apns config = %s, want %s", disabled, wantDisabled)
+	}
 	if err := st.ClearAPNSConfig(); err != nil {
-		t.Fatalf("ClearAPNSConfig (already clear): %v", err)
+		t.Fatalf("ClearAPNSConfig (already disabled): %v", err)
 	}
 }
 
 func TestReadAPNSConfigFailsLoudlyOnBrokenFile(t *testing.T) {
+	validPayload := `{"bundleId":"com.example.cc","keyId":"ABC123","keyPath":"/k.p8","sandbox":false,"teamId":"TEAM99"}`
+	valid := apnsConfigEnvelope(validPayload)
 	for _, tc := range []struct {
 		id      string
 		content string
 	}{
 		{id: "corrupt json", content: "{not json"},
-		{id: "empty object", content: `{}`},
-		{id: "missing bundle id", content: `{"key_path":"/k.p8","key_id":"ABC123","team_id":"TEAM99"}`},
+		{id: "old raw payload", content: validPayload},
+		{id: "missing schema", content: `{"schemaVersion":1,"schemaFingerprint":"` + apnsConfigSchemaFingerprint + `","payload":` + validPayload + `}`},
+		{id: "missing version", content: `{"schema":"` + apnsConfigSchemaIdentity + `","schemaFingerprint":"` + apnsConfigSchemaFingerprint + `","payload":` + validPayload + `}`},
+		{id: "missing fingerprint", content: `{"schema":"` + apnsConfigSchemaIdentity + `","schemaVersion":1,"payload":` + validPayload + `}`},
+		{id: "wrong schema", content: strings.Replace(valid, apnsConfigSchemaIdentity, "dev.yasyf.other", 1)},
+		{id: "old version", content: strings.Replace(valid, `"schemaVersion":1`, `"schemaVersion":0`, 1)},
+		{id: "new version", content: strings.Replace(valid, `"schemaVersion":1`, `"schemaVersion":2`, 1)},
+		{id: "wrong fingerprint", content: strings.Replace(valid, apnsConfigSchemaFingerprint, apnsConfigSchemaIdentity+".stale", 1)},
+		{id: "missing payload", content: `{"schema":"` + apnsConfigSchemaIdentity + `","schemaVersion":1,"schemaFingerprint":"` + apnsConfigSchemaFingerprint + `"}`},
+		{id: "null payload", content: apnsConfigEnvelope(`null`)},
+		{id: "empty payload", content: apnsConfigEnvelope(`{}`)},
+		{id: "missing bundle id", content: apnsConfigEnvelope(`{"keyId":"ABC123","keyPath":"/k.p8","sandbox":false,"teamId":"TEAM99"}`)},
+		{id: "missing sandbox", content: apnsConfigEnvelope(`{"bundleId":"com.example.cc","keyId":"ABC123","keyPath":"/k.p8","teamId":"TEAM99"}`)},
+		{id: "partial enabled config", content: apnsConfigEnvelope(`{"bundleId":"","keyId":"ABC123","keyPath":"/k.p8","sandbox":false,"teamId":"TEAM99"}`)},
+		{id: "extra envelope field", content: strings.TrimSuffix(valid, "}") + `,"legacy":true}`},
+		{id: "extra payload field", content: apnsConfigEnvelope(strings.TrimSuffix(validPayload, "}") + `,"legacy":true}`)},
+		{id: "trailing value", content: valid + ` {}`},
 	} {
 		t.Run(tc.id, func(t *testing.T) {
 			st := Store{Dir: t.TempDir()}
@@ -101,6 +132,22 @@ func TestReadAPNSConfigFailsLoudlyOnBrokenFile(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestWriteAPNSConfigRejectsPartialEnabledConfig(t *testing.T) {
+	st := Store{Dir: t.TempDir()}
+	if err := st.WriteAPNSConfig(APNSConfig{KeyID: "ABC123"}); err == nil {
+		t.Fatal("WriteAPNSConfig accepted a partial enabled config")
+	}
+}
+
+func apnsConfigEnvelope(payload string) string {
+	return fmt.Sprintf(
+		`{"schema":"%s","schemaVersion":1,"schemaFingerprint":"%s","payload":%s}`,
+		apnsConfigSchemaIdentity,
+		apnsConfigSchemaFingerprint,
+		payload,
+	)
 }
 
 func TestLoadAPNSKeyParsesP8(t *testing.T) {

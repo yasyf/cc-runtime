@@ -72,7 +72,7 @@ func TestSetBindRoundTrip(t *testing.T) {
 		t.Fatalf("Bind = %q, want %q", cfg.Bind, access.BindLAN)
 	}
 
-	// Idempotent when the bind already matches.
+	// Rewriting the same complete state preserves it exactly.
 	if err := setBind(st, access.BindLAN); err != nil {
 		t.Fatalf("setBind (match): %v", err)
 	}

@@ -15,6 +15,7 @@ import (
 	"github.com/yasyf/daemonkit/daemonrole"
 	"github.com/yasyf/daemonkit/wire"
 
+	"github.com/yasyf/cc-runtime/access"
 	"github.com/yasyf/cc-runtime/interaction"
 	"github.com/yasyf/cc-runtime/internal/processowner"
 	"github.com/yasyf/cc-runtime/version"
@@ -110,6 +111,13 @@ func newE2E(t *testing.T) *e2e {
 	testLauncher := daemon.Launcher{
 		Paths: interaction.AppPaths(), WireBuild: daemon.WireBuild, RuntimeBuild: version.Version,
 		Args: []string{"daemon"}, StopArgs: []string{daemon.StopControlCommand}, DaemonRole: role,
+	}
+	accessState := access.Store{Dir: interaction.AppPaths().StateDir()}
+	if err := accessState.WriteConfig(access.Config{Bind: access.BindLoopback}); err != nil {
+		t.Fatalf("write access config: %v", err)
+	}
+	if err := accessState.ClearAPNSConfig(); err != nil {
+		t.Fatalf("write disabled apns config: %v", err)
 	}
 
 	processes, err := processowner.New(interaction.AppPaths().StateDir(), "e2e-mesh-processes.db", 4)

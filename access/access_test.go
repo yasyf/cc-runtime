@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -11,18 +12,22 @@ import (
 func TestConfigRoundTrip(t *testing.T) {
 	s := Store{Dir: t.TempDir()}
 
-	cfg, err := s.ReadConfig()
-	if err != nil {
-		t.Fatalf("ReadConfig (absent): %v", err)
-	}
-	if cfg.Bind != "" {
-		t.Fatalf("absent config Bind = %q, want \"\"", cfg.Bind)
+	if _, err := s.ReadConfig(); err == nil {
+		t.Fatal("ReadConfig accepted an absent access config")
 	}
 
 	if err := s.WriteConfig(Config{Bind: BindLAN}); err != nil {
 		t.Fatalf("WriteConfig: %v", err)
 	}
-	cfg, err = s.ReadConfig()
+	written, err := os.ReadFile(s.ConfigPath())
+	if err != nil {
+		t.Fatalf("read persisted config: %v", err)
+	}
+	want := `{"schema":"dev.yasyf.cc-runtime.access","schemaVersion":1,"schemaFingerprint":"dev.yasyf.cc-runtime.access.729d1a3bd6b99aee47bd61e156a828cb20c942754523d8f93d7b12b3d9219bc1","payload":{"bind":"0.0.0.0"}}`
+	if string(written) != want {
+		t.Fatalf("persisted config = %s, want %s", written, want)
+	}
+	cfg, err := s.ReadConfig()
 	if err != nil {
 		t.Fatalf("ReadConfig: %v", err)
 	}
@@ -40,12 +45,46 @@ func TestConfigRoundTrip(t *testing.T) {
 }
 
 func TestConfigCorruptFailsLoudly(t *testing.T) {
-	s := Store{Dir: t.TempDir()}
-	if err := os.WriteFile(s.ConfigPath(), []byte("not json"), 0o600); err != nil {
-		t.Fatal(err)
+	valid := `{"schema":"` + accessConfigSchemaIdentity + `","schemaVersion":1,"schemaFingerprint":"` + accessConfigSchemaFingerprint + `","payload":{"bind":"127.0.0.1"}}`
+	for _, tc := range []struct {
+		name string
+		data string
+	}{
+		{name: "corrupt", data: "not json"},
+		{name: "old raw payload", data: `{"bind":"127.0.0.1"}`},
+		{name: "missing schema", data: `{"schemaVersion":1,"schemaFingerprint":"` + accessConfigSchemaFingerprint + `","payload":{"bind":"127.0.0.1"}}`},
+		{name: "missing version", data: `{"schema":"` + accessConfigSchemaIdentity + `","schemaFingerprint":"` + accessConfigSchemaFingerprint + `","payload":{"bind":"127.0.0.1"}}`},
+		{name: "missing fingerprint", data: `{"schema":"` + accessConfigSchemaIdentity + `","schemaVersion":1,"payload":{"bind":"127.0.0.1"}}`},
+		{name: "wrong schema", data: strings.Replace(valid, accessConfigSchemaIdentity, "dev.yasyf.other", 1)},
+		{name: "old version", data: strings.Replace(valid, `"schemaVersion":1`, `"schemaVersion":0`, 1)},
+		{name: "new version", data: strings.Replace(valid, `"schemaVersion":1`, `"schemaVersion":2`, 1)},
+		{name: "wrong fingerprint", data: strings.Replace(valid, accessConfigSchemaFingerprint, accessConfigSchemaIdentity+".stale", 1)},
+		{name: "missing payload", data: `{"schema":"` + accessConfigSchemaIdentity + `","schemaVersion":1,"schemaFingerprint":"` + accessConfigSchemaFingerprint + `"}`},
+		{name: "null payload", data: strings.Replace(valid, `{"bind":"127.0.0.1"}`, `null`, 1)},
+		{name: "missing bind", data: strings.Replace(valid, `{"bind":"127.0.0.1"}`, `{}`, 1)},
+		{name: "invalid bind", data: strings.Replace(valid, BindLoopback, "localhost", 1)},
+		{name: "extra envelope field", data: strings.TrimSuffix(valid, "}") + `,"legacy":true}`},
+		{name: "extra payload field", data: strings.Replace(valid, `"bind":"127.0.0.1"`, `"bind":"127.0.0.1","legacy":true`, 1)},
+		{name: "trailing value", data: valid + ` {}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := Store{Dir: t.TempDir()}
+			if err := os.WriteFile(s.ConfigPath(), []byte(tc.data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.ReadConfig(); err == nil {
+				t.Fatalf("ReadConfig accepted %s", tc.data)
+			}
+		})
 	}
-	if _, err := s.ReadConfig(); err == nil {
-		t.Fatal("ReadConfig on corrupt file succeeded, want error")
+}
+
+func TestWriteConfigRejectsInvalidBind(t *testing.T) {
+	for _, bind := range []string{"", "localhost", "::"} {
+		s := Store{Dir: t.TempDir()}
+		if err := s.WriteConfig(Config{Bind: bind}); err == nil {
+			t.Fatalf("WriteConfig accepted bind %q", bind)
+		}
 	}
 }
 

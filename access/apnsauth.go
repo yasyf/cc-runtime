@@ -4,11 +4,8 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/x509"
-	"encoding/json"
 	"encoding/pem"
-	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
@@ -24,13 +21,21 @@ const apnsTokenRefresh = 40 * time.Minute
 // APNSConfig points the APNs lane at an Apple-issued auth key: the .p8 on
 // disk (referenced in place, never copied), the key and team the provider
 // token is minted under, and the app bundle alerts are topic'd to. The zero
-// value is the disabled lane an absent config file yields.
+// value is the explicit disabled configuration.
 type APNSConfig struct {
-	KeyPath  string `json:"key_path"`
-	KeyID    string `json:"key_id"`
-	TeamID   string `json:"team_id"`
-	BundleID string `json:"bundle_id"`
-	Sandbox  bool   `json:"sandbox,omitempty"`
+	KeyPath  string
+	KeyID    string
+	TeamID   string
+	BundleID string
+	Sandbox  bool
+}
+
+type apnsConfigPayload struct {
+	BundleID *string `json:"bundleId"`
+	KeyID    *string `json:"keyId"`
+	KeyPath  *string `json:"keyPath"`
+	Sandbox  *bool   `json:"sandbox"`
+	TeamID   *string `json:"teamId"`
 }
 
 // Enabled reports whether the APNs lane is configured.
@@ -39,23 +44,34 @@ func (c APNSConfig) Enabled() bool { return c != (APNSConfig{}) }
 // APNSConfigPath is the persisted APNs configuration file.
 func (s Store) APNSConfigPath() string { return filepath.Join(s.Dir, "apns.json") }
 
-// ReadAPNSConfig loads the APNs config. An absent file is the disabled-lane
-// zero value; a present file missing any required field fails loudly — a
-// configured lane never degrades silently.
+// ReadAPNSConfig loads the exact persisted APNs configuration.
 func (s Store) ReadAPNSConfig() (APNSConfig, error) {
 	b, err := os.ReadFile(s.APNSConfigPath())
-	if errors.Is(err, fs.ErrNotExist) {
-		return APNSConfig{}, nil
-	}
 	if err != nil {
 		return APNSConfig{}, fmt.Errorf("read apns config %q: %w", s.APNSConfigPath(), err)
 	}
-	var c APNSConfig
-	if err := json.Unmarshal(b, &c); err != nil {
-		return APNSConfig{}, fmt.Errorf("parse apns config %q: %w", s.APNSConfigPath(), err)
+	payload, err := decodePersisted[apnsConfigPayload](
+		b,
+		s.APNSConfigPath(),
+		apnsConfigSchemaIdentity,
+		apnsConfigSchemaFingerprint,
+	)
+	if err != nil {
+		return APNSConfig{}, err
 	}
-	if c.KeyPath == "" || c.KeyID == "" || c.TeamID == "" || c.BundleID == "" {
-		return APNSConfig{}, fmt.Errorf("apns config %q: key_path, key_id, team_id, and bundle_id are all required", s.APNSConfigPath())
+	if payload.BundleID == nil || payload.KeyID == nil || payload.KeyPath == nil ||
+		payload.Sandbox == nil || payload.TeamID == nil {
+		return APNSConfig{}, fmt.Errorf("apns config %q: every payload field is required", s.APNSConfigPath())
+	}
+	c := APNSConfig{
+		KeyPath:  *payload.KeyPath,
+		KeyID:    *payload.KeyID,
+		TeamID:   *payload.TeamID,
+		BundleID: *payload.BundleID,
+		Sandbox:  *payload.Sandbox,
+	}
+	if err := validateAPNSConfig(c); err != nil {
+		return APNSConfig{}, fmt.Errorf("apns config %q: %w", s.APNSConfigPath(), err)
 	}
 	return c, nil
 }
@@ -63,10 +79,23 @@ func (s Store) ReadAPNSConfig() (APNSConfig, error) {
 // WriteAPNSConfig persists the APNs config (0600), creating the state dir if
 // needed.
 func (s Store) WriteAPNSConfig(c APNSConfig) error {
+	if err := validateAPNSConfig(c); err != nil {
+		return fmt.Errorf("apns config %q: %w", s.APNSConfigPath(), err)
+	}
 	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
 		return err
 	}
-	b, err := json.Marshal(c)
+	b, err := encodePersisted(
+		apnsConfigSchemaIdentity,
+		apnsConfigSchemaFingerprint,
+		apnsConfigPayload{
+			BundleID: &c.BundleID,
+			KeyID:    &c.KeyID,
+			KeyPath:  &c.KeyPath,
+			Sandbox:  &c.Sandbox,
+			TeamID:   &c.TeamID,
+		},
+	)
 	if err != nil {
 		return err
 	}
@@ -76,11 +105,17 @@ func (s Store) WriteAPNSConfig(c APNSConfig) error {
 	return nil
 }
 
-// ClearAPNSConfig disables the APNs lane by removing the config file.
-// Clearing an unconfigured lane is a no-op.
+// ClearAPNSConfig persists the exact disabled APNs configuration.
 func (s Store) ClearAPNSConfig() error {
-	if err := os.Remove(s.APNSConfigPath()); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("remove apns config %q: %w", s.APNSConfigPath(), err)
+	return s.WriteAPNSConfig(APNSConfig{})
+}
+
+func validateAPNSConfig(c APNSConfig) error {
+	if !c.Enabled() {
+		return nil
+	}
+	if c.KeyPath == "" || c.KeyID == "" || c.TeamID == "" || c.BundleID == "" {
+		return fmt.Errorf("keyPath, keyId, teamId, and bundleId are all required when enabled")
 	}
 	return nil
 }
