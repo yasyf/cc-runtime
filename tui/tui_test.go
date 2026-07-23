@@ -12,6 +12,10 @@ import (
 
 func TestWireMeshAllowsConcurrentScopedTUIs(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	if err := mesh.Initialize(context.Background()); err != nil {
+		t.Fatalf("initialize mesh: %v", err)
+	}
 	if _, err := mesh.Config.Update(context.Background(), func(reg *hostregistry.Registry) error {
 		reg.Self = meshSelf
 		reg.Hosts = []string{meshHost}

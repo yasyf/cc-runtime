@@ -171,6 +171,9 @@ func TestAddHostInverseFailureRollsBack(t *testing.T) {
 func TestAddHostInverseFailureKeepsPreexistingHost(t *testing.T) {
 	isolateHome(t)
 	const priorHost = "dave@prior.tail.ts.net"
+	if err := Initialize(context.Background()); err != nil {
+		t.Fatalf("initialize mesh: %v", err)
+	}
 	if _, err := Config.Update(context.Background(), func(g *hostregistry.Registry) error {
 		g.UpsertHost(priorHost)
 		return nil

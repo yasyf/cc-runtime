@@ -29,6 +29,9 @@ const daemonMeshProcessLimit = 64
 // push lanes — Web Push always, direct APNs when configured — feeding every
 // question/notification append.
 func buildServer(ctx context.Context, role daemonrole.Classifier, processes *processowner.Owner) (*daemon.Server, error) {
+	if err := mesh.Initialize(ctx); err != nil {
+		return nil, err
+	}
 	st := access.Store{Dir: interaction.AppPaths().StateDir()}
 	acfg, err := st.ReadConfig()
 	if err != nil {

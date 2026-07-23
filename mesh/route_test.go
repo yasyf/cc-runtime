@@ -48,13 +48,15 @@ func deadPeer() *MockRunner {
 	return NewMockRunner().DefaultSSH("", errors.New("ssh: connect timed out"))
 }
 
-// seedMesh isolates HOME to a temp dir and seeds the shared registry with self,
-// hosts, and the route-off flag, returning nothing — Route reads the shared state
-// fresh each call.
+// seedMesh isolates HOME to a temp dir and seeds the shared registry and exact
+// product-owned route state. Route reads both fresh each call.
 func seedMesh(t *testing.T, self string, routeOff bool, hosts ...string) {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("HOME", t.TempDir())
+	if err := Initialize(context.Background()); err != nil {
+		t.Fatalf("initialize mesh: %v", err)
+	}
 	if _, err := Config.Update(context.Background(), func(g *hostregistry.Registry) error {
 		g.Self = self
 		for _, h := range hosts {

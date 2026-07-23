@@ -88,6 +88,9 @@ func run(ctx context.Context, d cmd.Deps, scope string) (err error) {
 // answered over ssh. With no peers the model keeps its untouched local-only path.
 // A corrupt registry fails loud rather than silently dropping the mesh.
 func wireMesh(ctx context.Context, stateDir string, model *Model) (*processowner.Owner, error) {
+	if err := mesh.Initialize(ctx); err != nil {
+		return nil, err
+	}
 	reg, err := mesh.Config.Load()
 	if err != nil {
 		return nil, err

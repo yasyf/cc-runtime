@@ -59,6 +59,9 @@ func hostListCmd() *cobra.Command {
 		Short: "List mesh peers with a live reachability probe",
 		Args:  cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
+			if err := mesh.Initialize(c.Context()); err != nil {
+				return err
+			}
 			reg, err := mesh.Config.Load()
 			if err != nil {
 				return err
@@ -78,6 +81,9 @@ func hostRemoveCmd() *cobra.Command {
 		Short: "Remove a peer from the mesh",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
+			if err := mesh.Initialize(c.Context()); err != nil {
+				return err
+			}
 			target := args[0]
 			if err := mesh.Config.RemoveHost(c.Context(), target); err != nil {
 				return err

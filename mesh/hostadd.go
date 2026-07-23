@@ -19,6 +19,9 @@ import (
 // failure aborts, asking for --self. onStep (may be nil) reports each step as it
 // happens.
 func AddHost(ctx context.Context, r hostregistry.Runner, target, self string, noRecurse bool, onStep func(string)) error {
+	if err := Initialize(ctx); err != nil {
+		return err
+	}
 	step := func(msg string) {
 		if onStep != nil {
 			onStep(msg)

@@ -28,6 +28,9 @@ func runMeshRoute(t *testing.T, args ...string) (string, error) {
 
 func seedPeer(t *testing.T, target string) {
 	t.Helper()
+	if err := mesh.Initialize(context.Background()); err != nil {
+		t.Fatalf("initialize mesh: %v", err)
+	}
 	if _, err := mesh.Config.Update(context.Background(), func(g *hostregistry.Registry) error {
 		g.Self = "me@here.tail.ts.net"
 		g.UpsertHost(target)
@@ -58,8 +61,8 @@ func TestMeshRouteStatusNoPeers(t *testing.T) {
 	}
 }
 
-// TestMeshRouteToggle proves off/on persist RouteOff in the shared state and
-// status reflects it while the peer stays registered.
+// TestMeshRouteToggle proves off/on persist RouteOff in product-owned exact
+// state and status reflects it while the shared peer stays registered.
 func TestMeshRouteToggle(t *testing.T) {
 	isolateMesh(t)
 	seedPeer(t, "u@peer.tail.ts.net")

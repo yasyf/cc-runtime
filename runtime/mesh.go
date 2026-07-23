@@ -23,7 +23,7 @@ func meshCmd() *cobra.Command {
 }
 
 // meshRouteCmd toggles and reports presence routing. Routing is on by default
-// wherever peers exist; `off` persists the opt-out in the shared state without
+// wherever peers exist; `off` persists the product-owned opt-out without
 // dropping the peers, and `on` clears it.
 func meshRouteCmd() *cobra.Command {
 	c := &cobra.Command{
@@ -31,6 +31,9 @@ func meshRouteCmd() *cobra.Command {
 		Short: "Toggle surfacing interactions on an attended peer when this host is unattended",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
+			if err := mesh.Initialize(c.Context()); err != nil {
+				return err
+			}
 			out := c.OutOrStdout()
 			switch args[0] {
 			case "on", "off":
