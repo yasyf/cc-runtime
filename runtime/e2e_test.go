@@ -11,9 +11,12 @@ import (
 	"github.com/yasyf/cc-interact/daemon"
 	"github.com/yasyf/cc-interact/store"
 	"github.com/yasyf/cc-interact/subject"
+	dkdaemon "github.com/yasyf/daemonkit/daemon"
 	"github.com/yasyf/daemonkit/daemonrole"
+	"github.com/yasyf/daemonkit/wire"
 
 	"github.com/yasyf/cc-runtime/interaction"
+	"github.com/yasyf/cc-runtime/internal/processowner"
 	"github.com/yasyf/cc-runtime/version"
 )
 
@@ -68,17 +71,57 @@ func installTestRoleAlias(t *testing.T) {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
+func waitE2EClient(t *testing.T, launcher daemon.Launcher) *daemon.Client {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	var (
+		client *daemon.Client
+		health daemon.RuntimeHealth
+		err    error
+	)
+	for {
+		if client == nil {
+			client, err = launcher.NewClient(context.Background())
+		}
+		if err == nil {
+			health, err = client.RuntimeHealth(context.Background())
+			if err == nil && health.RuntimeBuild == launcher.RuntimeBuild &&
+				health.RuntimeProtocol == int(wire.ProtocolVersion) && health.ProcessGeneration != "" &&
+				health.Ready && health.State == dkdaemon.StateHealthy && !health.Draining {
+				t.Cleanup(func() { _ = client.Close() })
+				return client
+			}
+		}
+		if time.Now().After(deadline) {
+			if client != nil {
+				_ = client.Close()
+			}
+			t.Fatalf("daemon readiness: health=%+v err=%v", health, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func newE2E(t *testing.T) *e2e {
 	t.Helper()
 	t.Setenv("HOME", shortTempHome(t))
 	installTestRoleAlias(t)
 	role := testDaemonRole(t)
 	testLauncher := daemon.Launcher{
-		Paths: interaction.AppPaths(), Version: version.Version, LifecycleBuild: version.Version,
-		DaemonRole: role,
+		Paths: interaction.AppPaths(), WireBuild: daemon.WireBuild, RuntimeBuild: version.Version,
+		Args: []string{"daemon"}, StopArgs: []string{daemon.StopControlCommand}, DaemonRole: role,
 	}
 
-	s, err := buildServer(t.Context(), role)
+	processes, err := processowner.New(interaction.AppPaths().StateDir(), "e2e-mesh-processes.db", 4)
+	if err != nil {
+		t.Fatalf("process owner: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := processes.Close(context.Background()); err != nil {
+			t.Errorf("close process owner: %v", err)
+		}
+	})
+	s, err := buildServer(t.Context(), role, processes)
 	if err != nil {
 		t.Fatalf("buildServer: %v", err)
 	}
@@ -95,19 +138,7 @@ func newE2E(t *testing.T) *e2e {
 		}
 	})
 
-	deadline := time.Now().Add(5 * time.Second)
-	var client *daemon.Client
-	for {
-		client, err = testLauncher.NewClient(context.Background())
-		if err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("daemon socket never became available")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Cleanup(func() { _ = client.Close() })
+	client := waitE2EClient(t, testLauncher)
 
 	// A read-only resolver over the daemon's own DB, mirroring buildServer's
 	// subject wiring, so the test can pull the exact subject.Subject the gate

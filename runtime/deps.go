@@ -40,8 +40,8 @@ func launcher() (daemon.Launcher, error) {
 		return daemon.Launcher{}, err
 	}
 	return daemon.Launcher{
-		Paths: appPaths(), Version: version.Version, LifecycleBuild: version.Version,
-		Args: []string{"daemon"}, DaemonRole: role,
+		Paths: appPaths(), WireBuild: daemon.WireBuild, RuntimeBuild: version.Version,
+		Args: []string{"daemon"}, StopArgs: []string{daemon.StopControlCommand}, DaemonRole: role,
 	}, nil
 }
 
@@ -72,12 +72,26 @@ func deps() cmd.Deps {
 			}
 			return launcher.EnsureCurrentIfRunning(ctx)
 		},
+		Stop: func(ctx context.Context) error {
+			launcher, err := launcher()
+			if err != nil {
+				return err
+			}
+			return launcher.Stop(ctx, daemon.UpgradeTimeout)
+		},
+		RunStopControl: func(ctx context.Context) error {
+			launcher, err := launcher()
+			if err != nil {
+				return err
+			}
+			return launcher.RunStopControl(ctx)
+		},
 		ClaudePID:     claudePID,
 		WindowAlive:   live,
 		TerminalEvent: func(string) bool { return false },
 		Serve:         serve,
 		ChannelTools: func(ctx context.Context, session, scope string) ([]channel.Tool, string, string, error) {
-			return interaction.ChannelTools(ctx, session, scope, claudePID(), version.Version)
+			return interaction.ChannelTools(ctx, session, scope, claudePID())
 		},
 	}
 }

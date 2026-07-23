@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"net"
 
 	"github.com/yasyf/cc-interact/channel"
@@ -13,10 +14,13 @@ import (
 
 	"github.com/yasyf/cc-runtime/access"
 	"github.com/yasyf/cc-runtime/interaction"
+	"github.com/yasyf/cc-runtime/internal/processowner"
 	"github.com/yasyf/cc-runtime/internal/web"
 	"github.com/yasyf/cc-runtime/mesh"
 	"github.com/yasyf/cc-runtime/version"
 )
+
+const daemonMeshProcessLimit = 64
 
 // buildServer composes the cc-runtime daemon: the interaction ops, the edit
 // gate, the projection schema, the channel presence lifecycle, the access
@@ -24,7 +28,7 @@ import (
 // tokenless mesh trust when the shared synckit mesh state exists, and the
 // push lanes — Web Push always, direct APNs when configured — feeding every
 // question/notification append.
-func buildServer(ctx context.Context, role daemonrole.Classifier) (*daemon.Server, error) {
+func buildServer(ctx context.Context, role daemonrole.Classifier, processes *processowner.Owner) (*daemon.Server, error) {
 	st := access.Store{Dir: interaction.AppPaths().StateDir()}
 	acfg, err := st.ReadConfig()
 	if err != nil {
@@ -47,8 +51,8 @@ func buildServer(ctx context.Context, role daemonrole.Classifier) (*daemon.Serve
 	cfg := daemon.Config{
 		AppName:           interaction.AppName,
 		Paths:             interaction.AppPaths(),
-		Version:           version.Version,
-		LifecycleBuild:    version.Version,
+		WireBuild:         daemon.WireBuild,
+		RuntimeBuild:      version.Version,
 		DaemonRole:        role,
 		ActiveStatuses:    interaction.ActiveStatuses,
 		Gate:              interaction.Gate(),
@@ -86,9 +90,13 @@ func buildServer(ctx context.Context, role daemonrole.Classifier) (*daemon.Serve
 		cfg.TrustedOrigin = tp.TrustedOrigin
 		cfg.ExtraHTTPListeners = append(cfg.ExtraHTTPListeners, tailnetListeners(interaction.AppPaths(), acfg.Bind, tp.SelfAddrs(ctx))...)
 	}
-	router := mesh.NewRouter(mesh.NewExecRunner(), rpcDial)
+	runner := mesh.NewExecRunner(processes.Runner())
+	router := mesh.NewRouter(runner, func(string) mesh.Runner { return runner })
 	fanout := &pushFanout{router: router}
 	cfg.BootReconcile = func(bootCtx context.Context, active *daemon.Server) error {
+		if err := processes.Recover(bootCtx); err != nil {
+			return err
+		}
 		sender := access.NewPushSender(vapid, active.DB(), active.Append)
 		if err := sender.ReconcileGrants(bootCtx, token, acfg.Bind); err != nil {
 			return err
@@ -121,12 +129,17 @@ func buildServer(ctx context.Context, role daemonrole.Classifier) (*daemon.Serve
 	return s, nil
 }
 
-func serve(ctx context.Context) error {
+func serve(ctx context.Context) (err error) {
 	role, err := daemonRole()
 	if err != nil {
 		return err
 	}
-	s, err := buildServer(ctx, role)
+	processes, err := processowner.New(appPaths().StateDir(), "daemon-mesh-processes.db", daemonMeshProcessLimit)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, processes.Close(ctx)) }()
+	s, err := buildServer(ctx, role, processes)
 	if err != nil {
 		return err
 	}

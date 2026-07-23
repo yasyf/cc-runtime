@@ -34,8 +34,8 @@ func newChannelHarness(t *testing.T) *channelHarness {
 	s, err := daemon.New(daemon.Config{
 		AppName:         AppName,
 		Paths:           p,
-		Version:         "v0.0.0-test",
-		LifecycleBuild:  "v0.0.0-test",
+		WireBuild:       daemon.WireBuild,
+		RuntimeBuild:    "v0.0.0-test",
 		DaemonRole:      testDaemonRole(t),
 		ActiveStatuses:  ActiveStatuses,
 		Gate:            Gate(),
@@ -59,21 +59,7 @@ func newChannelHarness(t *testing.T) *channelHarness {
 		}
 	})
 
-	deadline := time.Now().Add(5 * time.Second)
-	var client *daemon.Client
-	for {
-		client, err = daemon.NewClient(context.Background(), daemon.ClientConfig{
-			Socket: p.SocketPath(), Build: "v0.0.0-test", LifecycleBuild: "v0.0.0-test",
-		})
-		if err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("daemon socket never became available")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Cleanup(func() { _ = client.Close() })
+	client := waitReadyClient(t, p, "v0.0.0-test")
 
 	r, err := client.Do(context.Background(), daemon.Envelope{Op: OpList, Scope: testScope})
 	if err != nil {
@@ -88,7 +74,7 @@ func newChannelHarness(t *testing.T) *channelHarness {
 
 func askTool(t *testing.T, session string, pid int) channel.Tool {
 	t.Helper()
-	tools, method, instructions, err := ChannelTools(context.Background(), session, testScope, pid, "v0.0.0-test")
+	tools, method, instructions, err := ChannelTools(context.Background(), session, testScope, pid)
 	if err != nil {
 		t.Fatalf("ChannelTools: %v", err)
 	}
@@ -454,7 +440,7 @@ func TestFreshWindowDoesNotInheritDeadOwnersAwaitingSubject(t *testing.T) {
 // one window in a non-default scope.
 func askToolFor(t *testing.T, session string, pid int, scope string) channel.Tool {
 	t.Helper()
-	tools, _, _, err := ChannelTools(context.Background(), session, scope, pid, "v0.0.0-test")
+	tools, _, _, err := ChannelTools(context.Background(), session, scope, pid)
 	if err != nil {
 		t.Fatalf("ChannelTools: %v", err)
 	}

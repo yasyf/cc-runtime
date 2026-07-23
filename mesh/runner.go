@@ -4,16 +4,13 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"os/exec"
+	"os"
 	"strings"
-	"time"
 
+	"github.com/yasyf/daemonkit/proc"
+	"github.com/yasyf/daemonkit/supervise"
 	"github.com/yasyf/synckit/hostregistry"
 )
-
-// sshOnceWaitDelay bounds how long a single-dial ssh blocks on its pipes after
-// the leader exits, mirroring synckit's own wait delay.
-const sshOnceWaitDelay = 5 * time.Second
 
 // Runner executes the `cc-runtime rpc` passthrough for the mesh fan-out. Every
 // leg feeds the JSON params over stdin — never argv, which any process on
@@ -32,38 +29,61 @@ type Runner interface {
 	SSHOnce(ctx context.Context, target, remoteCmd string, stdin []byte) (string, error)
 }
 
-// NewExecRunner returns the production Runner: Local shells out directly, SSH
-// rides synckit's failover dialer, SSHOnce spawns one ssh against the target.
-func NewExecRunner() Runner { return execRunner{} }
+// NewExecRunner returns the production Runner backed by runner's durable
+// process ownership.
+func NewExecRunner(runner supervise.TaskRunner) Runner { return execRunner{runner: runner} }
 
-type execRunner struct{}
+type execRunner struct{ runner supervise.TaskRunner }
 
-func (execRunner) Local(ctx context.Context, stdin []byte, name string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // G204: name/args are the fixed rpc passthrough, not untrusted input.
-	cmd.Stdin = bytes.NewReader(stdin)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return stdout.String(), fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
-	}
-	return stdout.String(), nil
+func (r execRunner) Local(ctx context.Context, stdin []byte, name string, args ...string) (string, error) {
+	return r.run(ctx, stdin, name, args, name+" "+strings.Join(args, " "))
 }
 
-func (execRunner) SSH(ctx context.Context, target, remoteCmd string, stdin []byte) (string, error) {
-	return hostregistry.ExecSSH(ctx, target, remoteCmd, stdin)
+func (r execRunner) SSH(ctx context.Context, target, remoteCmd string, stdin []byte) (string, error) {
+	return hostregistry.ExecSSH(ctx, r.runner, target, remoteCmd, stdin)
 }
 
-func (execRunner) SSHOnce(ctx context.Context, target, remoteCmd string, stdin []byte) (string, error) {
+func (r execRunner) SSHOnce(ctx context.Context, target, remoteCmd string, stdin []byte) (string, error) {
 	argv := hostregistry.SSHArgv(target, remoteCmd)
-	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...) //nolint:gosec // G204: argv is ssh against a registered target running the fixed rpc passthrough.
-	cmd.Stdin = bytes.NewReader(stdin)
-	cmd.WaitDelay = sshOnceWaitDelay
+	return r.run(ctx, stdin, argv[0], argv[1:], "ssh "+target)
+}
+
+func (r execRunner) run(ctx context.Context, stdin []byte, path string, args []string, label string) (string, error) {
+	input, err := runnerInput(stdin)
+	if err != nil {
+		return "", err
+	}
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return stdout.String(), fmt.Errorf("ssh %s: %w: %s", target, err, strings.TrimSpace(stderr.String()))
+	err = r.runner.Run(ctx, supervise.Task{
+		RecoveryClass: proc.RecoveryTask,
+		Path:          path,
+		Args:          args,
+		Stdin:         input,
+		Stdout:        &stdout,
+		Stderr:        &stderr,
+	})
+	if err == nil {
+		err = ctx.Err()
+	}
+	if err != nil {
+		return stdout.String(), fmt.Errorf("%s: %w: %s", label, err, strings.TrimSpace(stderr.String()))
 	}
 	return stdout.String(), nil
+}
+
+func runnerInput(payload []byte) (*os.File, error) {
+	input, err := os.CreateTemp("", "cc-runtime-task-input-*")
+	if err != nil {
+		return nil, fmt.Errorf("create task input: %w", err)
+	}
+	_ = os.Remove(input.Name())
+	if _, err := input.Write(payload); err != nil {
+		_ = input.Close()
+		return nil, fmt.Errorf("write task input: %w", err)
+	}
+	if _, err := input.Seek(0, 0); err != nil {
+		_ = input.Close()
+		return nil, fmt.Errorf("rewind task input: %w", err)
+	}
+	return input, nil
 }

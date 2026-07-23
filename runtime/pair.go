@@ -173,11 +173,7 @@ func ensureDaemon(ctx context.Context, d cmd.Deps, tokenChanged bool, wantExtras
 		return daemon.HTTPInfo{}, err
 	}
 	if needsRestart(info, tokenChanged, wantExtras) {
-		client, err := d.NewClient(ctx)
-		if err != nil {
-			return daemon.HTTPInfo{}, err
-		}
-		if err := restartDaemon(ctx, d, client); err != nil {
+		if err := restartDaemon(ctx, d); err != nil {
 			return daemon.HTTPInfo{}, err
 		}
 		info = readHTTPInfo(d.Paths)
@@ -209,12 +205,9 @@ func validateSecureHTTPInfo(info daemon.HTTPInfo) error {
 
 // restartDaemon retires the running daemon session, then lets EnsureCurrent
 // replace it with an exact-build daemon that re-reads the access config.
-func restartDaemon(ctx context.Context, d cmd.Deps, client *daemon.Client) error {
-	if err := client.Shutdown(ctx); err != nil {
+func restartDaemon(ctx context.Context, d cmd.Deps) error {
+	if err := d.Stop(ctx); err != nil {
 		return fmt.Errorf("shut down daemon: %w", err)
-	}
-	if err := client.Close(); err != nil {
-		return fmt.Errorf("close daemon session: %w", err)
 	}
 	return d.EnsureCurrent(ctx)
 }

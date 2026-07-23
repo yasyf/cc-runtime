@@ -11,8 +11,10 @@ import (
 	"time"
 
 	"github.com/yasyf/cc-interact/daemon"
+	dkdaemon "github.com/yasyf/daemonkit/daemon"
 	"github.com/yasyf/daemonkit/daemonrole"
 	"github.com/yasyf/daemonkit/paths"
+	"github.com/yasyf/daemonkit/wire"
 )
 
 // shortTempHome returns a short-pathed temp HOME so the daemon's unix socket
@@ -35,6 +37,39 @@ func testDaemonRole(t *testing.T) daemonrole.Classifier {
 		t.Fatal(err)
 	}
 	return daemonrole.Classifier{RoleID: "com.yasyf.cc-runtime.test", RolePath: filepath.Clean(executable)}
+}
+
+func waitReadyClient(t *testing.T, p paths.Paths, runtimeBuild string) *daemon.Client {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	var (
+		client *daemon.Client
+		health daemon.RuntimeHealth
+		err    error
+	)
+	for {
+		if client == nil {
+			client, err = daemon.NewClient(context.Background(), daemon.ClientConfig{
+				Socket: p.SocketPath(), WireBuild: daemon.WireBuild,
+			})
+		}
+		if err == nil {
+			health, err = client.RuntimeHealth(context.Background())
+			if err == nil && health.RuntimeBuild == runtimeBuild &&
+				health.RuntimeProtocol == int(wire.ProtocolVersion) && health.ProcessGeneration != "" &&
+				health.Ready && health.State == dkdaemon.StateHealthy && !health.Draining {
+				t.Cleanup(func() { _ = client.Close() })
+				return client
+			}
+		}
+		if time.Now().After(deadline) {
+			if client != nil {
+				_ = client.Close()
+			}
+			t.Fatalf("daemon readiness: health=%+v err=%v", health, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 const (
@@ -95,8 +130,8 @@ func newHarness(t *testing.T, tweaks ...func(*daemon.Config)) *harness {
 	cfg := daemon.Config{
 		AppName:         "cc-runtime-test",
 		Paths:           p,
-		Version:         "v0.0.0-test",
-		LifecycleBuild:  "v0.0.0-test",
+		WireBuild:       daemon.WireBuild,
+		RuntimeBuild:    "v0.0.0-test",
 		DaemonRole:      testDaemonRole(t),
 		ActiveStatuses:  ActiveStatuses,
 		Gate:            Gate(),
@@ -126,21 +161,7 @@ func newHarness(t *testing.T, tweaks ...func(*daemon.Config)) *harness {
 		}
 	})
 
-	deadline := time.Now().Add(5 * time.Second)
-	var client *daemon.Client
-	for {
-		client, err = daemon.NewClient(context.Background(), daemon.ClientConfig{
-			Socket: p.SocketPath(), Build: cfg.Version, LifecycleBuild: cfg.LifecycleBuild,
-		})
-		if err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("daemon socket never became available")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Cleanup(func() { _ = client.Close() })
+	client := waitReadyClient(t, p, cfg.RuntimeBuild)
 	return &harness{t: t, client: client, paths: p, fanout: fanout}
 }
 

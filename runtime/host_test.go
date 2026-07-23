@@ -14,7 +14,10 @@ import (
 func TestPrintHostListEmpty(t *testing.T) {
 	var out bytes.Buffer
 	reg := &hostregistry.Registry{Self: "alice@mac.tail.ts.net"}
-	if err := printHostList(context.Background(), &out, reg, meshDial); err != nil {
+	if err := printHostList(context.Background(), &out, reg, func(string) hostregistry.Runner {
+		t.Fatal("empty host list dialed a peer")
+		return nil
+	}); err != nil {
 		t.Fatalf("printHostList: %v", err)
 	}
 	got := out.String()

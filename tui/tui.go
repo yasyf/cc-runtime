@@ -6,6 +6,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -17,12 +18,16 @@ import (
 	"github.com/yasyf/cc-interact/daemon"
 
 	"github.com/yasyf/cc-runtime/interaction"
+	"github.com/yasyf/cc-runtime/internal/processowner"
 	"github.com/yasyf/cc-runtime/mesh"
 )
 
 // eventBuffer sizes the channel between the SSE consumer goroutine and the
 // Update loop, so a burst of events never blocks the stream reader.
-const eventBuffer = 64
+const (
+	eventBuffer      = 64
+	meshProcessLimit = 8
+)
 
 // TUICmd is the cc-runtime answer surface. It cold-starts the daemon, polls
 // OpList until a subject is awaiting, then streams that subject's events into a
@@ -49,7 +54,7 @@ func TUICmd(d cmd.Deps) *cobra.Command {
 // run wires the events channel, the consumer launcher, and the model, then runs
 // the program. The consumer launches once the model resolves the subject, so the
 // TUI works whether the agent asks before or after the human opens it.
-func run(ctx context.Context, d cmd.Deps, scope string) error {
+func run(ctx context.Context, d cmd.Deps, scope string) (err error) {
 	events := make(chan liveEvent, eventBuffer)
 	client, err := d.NewClient(ctx)
 	if err != nil {
@@ -65,8 +70,12 @@ func run(ctx context.Context, d cmd.Deps, scope string) error {
 			go streamInto(ctx, d, scope, res, events)
 		}
 	}
-	if err := wireMesh(&model); err != nil {
+	processes, err := wireMesh(ctx, d.Paths.StateDir(), &model)
+	if err != nil {
 		return err
+	}
+	if processes != nil {
+		defer func() { err = errors.Join(err, processes.Close(ctx)) }()
 	}
 
 	p := tea.NewProgram(model, tea.WithContext(ctx))
@@ -78,18 +87,28 @@ func run(ctx context.Context, d cmd.Deps, scope string) error {
 // then fans interaction.list across every machine and a remote subject is
 // answered over ssh. With no peers the model keeps its untouched local-only path.
 // A corrupt registry fails loud rather than silently dropping the mesh.
-func wireMesh(model *Model) error {
+func wireMesh(ctx context.Context, stateDir string, model *Model) (*processowner.Owner, error) {
 	reg, err := mesh.Config.Load()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(reg.Hosts) == 0 {
-		return nil
+		return nil, nil
 	}
+	processes, err := processowner.NewLocked(
+		ctx, stateDir, "tui-mesh-processes.db", "tui-mesh-processes.lock", meshProcessLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if err := processes.Recover(ctx); err != nil {
+		return nil, errors.Join(err, processes.Close(ctx))
+	}
+	runner := mesh.NewExecRunner(processes.Runner())
 	model.reg = reg
-	model.local = mesh.NewExecRunner()
-	model.dial = func(string) mesh.Runner { return mesh.NewExecRunner() }
-	return nil
+	model.local = runner
+	model.dial = func(string) mesh.Runner { return runner }
+	return processes, nil
 }
 
 // streamInto consumes the subject's event log off the daemon's HTTP plane and

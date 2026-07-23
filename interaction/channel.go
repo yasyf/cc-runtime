@@ -171,14 +171,14 @@ func awaitAnswer(ctx context.Context, client *daemon.Client, session, scope stri
 // orchestrated agent plus a manual `cc-runtime wrap -- claude --resume
 // <session>` in the same scope — rebind the same subject back and forth and
 // share its questions and edit-gate state. That launch is unsupported.
-func ChannelTools(_ context.Context, session, scope string, pid int, build string) ([]channel.Tool, string, string, error) {
+func ChannelTools(_ context.Context, session, scope string, pid int) ([]channel.Tool, string, string, error) {
 	ask := channel.Tool{
 		Name:        "ask",
 		Description: "Ask the human a question with structured options; remotely answerable and persisted for the session. Use this instead of the native AskUserQuestion. Blocks your edits until the human responds.",
 		InputSchema: askToolSchema(),
 		Handler: func(ctx context.Context, args json.RawMessage, _ func(string)) (string, bool) {
 			client, err := daemon.NewClient(ctx, daemon.ClientConfig{
-				Socket: AppPaths().SocketPath(), Build: build, LifecycleBuild: build,
+				Socket: AppPaths().SocketPath(), WireBuild: daemon.WireBuild,
 			})
 			if err != nil {
 				return "ask failed: " + err.Error(), true
@@ -214,7 +214,7 @@ func ChannelTools(_ context.Context, session, scope string, pid int, build strin
 		InputSchema: notifyToolSchema(),
 		Handler: func(ctx context.Context, args json.RawMessage, _ func(string)) (string, bool) {
 			client, err := daemon.NewClient(ctx, daemon.ClientConfig{
-				Socket: AppPaths().SocketPath(), Build: build, LifecycleBuild: build,
+				Socket: AppPaths().SocketPath(), WireBuild: daemon.WireBuild,
 			})
 			if err != nil {
 				return "notify failed: " + err.Error(), true

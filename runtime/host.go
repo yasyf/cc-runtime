@@ -17,15 +17,6 @@ import (
 // maxVerifyHosts bounds the concurrent host-verify fan-out.
 const maxVerifyHosts = 8
 
-func meshRunner() hostregistry.Runner { return hostregistry.NewExecRunner() }
-
-// meshDial binds a peer to the ssh runner that reaches it; the exec runner takes
-// the target on each SSH call, so every peer shares one stateless runner.
-func meshDial(string) hostregistry.Runner { return hostregistry.NewExecRunner() }
-
-// rpcDial is meshDial for the rpc fan-out's stdin-fed transport.
-func rpcDial(string) mesh.Runner { return mesh.NewExecRunner() }
-
 // hostCmd manages the machine mesh: the peers this host reaches over ssh and
 // how peers reach this host.
 func hostCmd() *cobra.Command {
@@ -52,7 +43,9 @@ func hostAddCmd() *cobra.Command {
 			target := args[0]
 			out := c.OutOrStdout()
 			step := func(msg string) { fmt.Fprintln(out, msg) }
-			return mesh.AddHost(c.Context(), meshRunner(), target, self, noRecurse, step)
+			return hostregistry.WithExecRunner(c.Context(), func(runner hostregistry.Runner) error {
+				return mesh.AddHost(c.Context(), runner, target, self, noRecurse, step)
+			})
 		},
 	}
 	c.Flags().BoolVar(&noRecurse, "no-recurse", false, "skip cross-registering this host on the peer")
@@ -70,7 +63,11 @@ func hostListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printHostList(c.Context(), c.OutOrStdout(), reg, meshDial)
+			return hostregistry.WithExecRunner(c.Context(), func(runner hostregistry.Runner) error {
+				return printHostList(c.Context(), c.OutOrStdout(), reg, func(string) hostregistry.Runner {
+					return runner
+				})
+			})
 		},
 	}
 }
