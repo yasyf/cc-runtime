@@ -66,6 +66,8 @@ func TestEnsureVAPIDFailsOnBadFile(t *testing.T) {
 		{id: "legacy bare keys", content: `{"public":"public","private":"private"}`},
 		{id: "extra envelope field", content: strings.TrimSuffix(validVAPIDEnvelope(t), "}") + `,"legacy":true}`},
 		{id: "extra payload field", content: strings.Replace(validVAPIDEnvelope(t), `"private":"private"`, `"private":"private","legacy":true`, 1)},
+		{id: "duplicate envelope field", content: strings.Replace(validVAPIDEnvelope(t), `"schemaVersion":1`, `"schemaVersion":1,"schemaVersion":1`, 1)},
+		{id: "duplicate payload field", content: strings.Replace(validVAPIDEnvelope(t), `"private":"private"`, `"private":"private","private":"private"`, 1)},
 		{id: "wrong identity", content: strings.Replace(validVAPIDEnvelope(t), vapidConfigSchemaIdentity, "foreign", 1)},
 		{id: "wrong version", content: strings.Replace(validVAPIDEnvelope(t), `"schemaVersion":1`, `"schemaVersion":2`, 1)},
 		{id: "wrong fingerprint", content: strings.Replace(validVAPIDEnvelope(t), vapidConfigSchemaFingerprint, "foreign", 1)},

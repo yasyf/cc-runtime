@@ -65,6 +65,8 @@ func TestConfigCorruptFailsLoudly(t *testing.T) {
 		{name: "invalid bind", data: strings.Replace(valid, BindLoopback, "localhost", 1)},
 		{name: "extra envelope field", data: strings.TrimSuffix(valid, "}") + `,"legacy":true}`},
 		{name: "extra payload field", data: strings.Replace(valid, `"bind":"127.0.0.1"`, `"bind":"127.0.0.1","legacy":true`, 1)},
+		{name: "duplicate envelope field", data: strings.Replace(valid, `"schemaVersion":1`, `"schemaVersion":1,"schemaVersion":1`, 1)},
+		{name: "duplicate payload field", data: strings.Replace(valid, `"bind":"127.0.0.1"`, `"bind":"127.0.0.1","bind":"127.0.0.1"`, 1)},
 		{name: "trailing value", data: valid + ` {}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

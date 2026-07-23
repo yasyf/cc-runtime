@@ -120,6 +120,8 @@ func TestReadAPNSConfigFailsLoudlyOnBrokenFile(t *testing.T) {
 		{id: "partial enabled config", content: apnsConfigEnvelope(`{"bundleId":"","keyId":"ABC123","keyPath":"/k.p8","sandbox":false,"teamId":"TEAM99"}`)},
 		{id: "extra envelope field", content: strings.TrimSuffix(valid, "}") + `,"legacy":true}`},
 		{id: "extra payload field", content: apnsConfigEnvelope(strings.TrimSuffix(validPayload, "}") + `,"legacy":true}`)},
+		{id: "duplicate envelope field", content: strings.Replace(valid, `"schemaVersion":1`, `"schemaVersion":1,"schemaVersion":1`, 1)},
+		{id: "duplicate payload field", content: strings.Replace(valid, `"bundleId":"com.example.cc"`, `"bundleId":"com.example.cc","bundleId":"com.example.cc"`, 1)},
 		{id: "trailing value", content: valid + ` {}`},
 	} {
 		t.Run(tc.id, func(t *testing.T) {

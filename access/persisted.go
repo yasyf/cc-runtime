@@ -1,11 +1,10 @@
 package access
 
 import (
-	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
+
+	"github.com/yasyf/synckit/hostregistry"
 )
 
 const (
@@ -38,16 +37,7 @@ func decodePersisted[Payload any](
 	fingerprint string,
 ) (Payload, error) {
 	var envelope persistedEnvelope[Payload]
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&envelope); err != nil {
-		return envelope.Payload, fmt.Errorf("parse persisted state %q: %w", path, err)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return envelope.Payload, fmt.Errorf("parse persisted state %q: trailing JSON value", path)
-		}
+	if err := hostregistry.DecodeExactJSON(data, &envelope); err != nil {
 		return envelope.Payload, fmt.Errorf("parse persisted state %q: %w", path, err)
 	}
 	if envelope.Schema != identity {
