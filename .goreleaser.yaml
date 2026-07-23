@@ -4,6 +4,7 @@ project_name: cc-runtime
 
 before:
   hooks:
+    - ./scripts/release-preflight.sh
     - bash -c 'cd web && npm ci && npm run build'
     - go mod tidy
 
@@ -35,7 +36,7 @@ archives:
 
 notarize:
   macos:
-    - enabled: '{{ if envOrDefault "MACOS_SIGN_P12" "" }}true{{ else }}false{{ end }}'
+    - enabled: true
       ids: [cc-runtime]
       sign:
         certificate: "{{ .Env.MACOS_SIGN_P12 }}"

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- Releases now fail before building unless the Homebrew, exact Developer ID,
+  certificate-chain, and Apple notarization inputs are all present and valid.
+  Signing and accepted notarization are mandatory before artifacts publish.
 - `access.json` and `apns.json` now use exact schema-v1 envelopes with pinned
   identities and fingerprints. Missing, stale, partial, or extended files fail
   instead of receiving defaults or repair; explicit commands write complete
