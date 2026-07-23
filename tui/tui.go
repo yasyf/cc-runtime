@@ -95,9 +95,7 @@ func wireMesh(ctx context.Context, stateDir string, model *Model) (*processowner
 	if len(reg.Hosts) == 0 {
 		return nil, nil
 	}
-	processes, err := processowner.NewLocked(
-		ctx, stateDir, "tui-mesh-processes.db", "tui-mesh-processes.lock", meshProcessLimit,
-	)
+	processes, err := processowner.NewIsolated(ctx, stateDir, "tui-mesh-processes", meshProcessLimit)
 	if err != nil {
 		return nil, err
 	}

@@ -2,39 +2,65 @@ package processowner
 
 import (
 	"context"
-	"errors"
+	"os"
+	"path/filepath"
 	"testing"
-	"time"
+
+	"github.com/yasyf/daemonkit/proc"
 )
 
-func TestLockedOwnerExcludesConcurrentGeneration(t *testing.T) {
+func TestIsolatedOwnersRunConcurrently(t *testing.T) {
 	dir := t.TempDir()
-	owner, err := NewLocked(context.Background(), dir, "processes.db", "processes.lock", 2)
+	first, err := NewIsolated(context.Background(), dir, "tui", 2)
 	if err != nil {
-		t.Fatalf("NewLocked: %v", err)
+		t.Fatalf("first NewIsolated: %v", err)
 	}
-	if err := owner.Recover(context.Background()); err != nil {
-		t.Fatalf("Recover: %v", err)
+	second, err := NewIsolated(context.Background(), dir, "tui", 2)
+	if err != nil {
+		_ = first.Close(context.Background())
+		t.Fatalf("second NewIsolated: %v", err)
+	}
+	if first.recordPath == second.recordPath || first.storePath == second.storePath {
+		t.Fatalf("owners share state: first=%q second=%q", first.recordPath, second.recordPath)
+	}
+	if err := first.Recover(context.Background()); err != nil {
+		t.Fatalf("first Recover: %v", err)
+	}
+	if err := second.Recover(context.Background()); err != nil {
+		t.Fatalf("second Recover: %v", err)
+	}
+	if err := first.Close(context.Background()); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	if err := second.Close(context.Background()); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+}
+
+func TestIsolatedOwnerRecoversOrphanedGeneration(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "tui")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	record := ownerRecord{
+		Schema: ownerSchemaV1, Generation: "orphan", Store: "orphan.db",
+		Identity: proc.Identity{PID: os.Getpid(), StartTime: "dead", Boot: "old", Comm: "cc-runtime"},
+	}
+	recordPath := filepath.Join(root, "orphan.json")
+	if err := writeRecord(root, recordPath, record); err != nil {
+		t.Fatalf("write orphan: %v", err)
 	}
 
-	waitCtx, cancel := context.WithTimeout(context.Background(), 75*time.Millisecond)
-	defer cancel()
-	_, err = NewLocked(waitCtx, dir, "processes.db", "processes.lock", 2)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("concurrent owner error = %v, want deadline", err)
+	owner, err := NewIsolated(context.Background(), dir, "tui", 2)
+	if err != nil {
+		t.Fatalf("NewIsolated: %v", err)
+	}
+	if _, err := os.Stat(recordPath); !os.IsNotExist(err) {
+		_ = owner.Close(context.Background())
+		t.Fatalf("orphan record still exists: %v", err)
 	}
 	if err := owner.Close(context.Background()); err != nil {
 		t.Fatalf("Close: %v", err)
-	}
-
-	successor, err := NewLocked(context.Background(), dir, "processes.db", "processes.lock", 2)
-	if err != nil {
-		t.Fatalf("successor NewLocked: %v", err)
-	}
-	if err := successor.Recover(context.Background()); err != nil {
-		t.Fatalf("successor Recover: %v", err)
-	}
-	if err := successor.Close(context.Background()); err != nil {
-		t.Fatalf("successor Close: %v", err)
 	}
 }
