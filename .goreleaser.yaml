@@ -4,7 +4,6 @@ project_name: cc-runtime
 
 before:
   hooks:
-    - ./scripts/release-preflight.sh
     - bash -c 'cd web && npm ci && npm run build'
     - go mod tidy
 

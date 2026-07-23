@@ -6,13 +6,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.0] - 2026-07-23
+## [0.10.0] - 2026-07-23
 
 ### Changed
 - Pin daemonkit v0.10.0 for the released fleet runtime.
 - Releases now fail before building unless the Homebrew, exact Developer ID,
   certificate-chain, and Apple notarization inputs are all present and valid.
   Signing and accepted notarization are mandatory before artifacts publish.
+- Release credential preflight runs once before the shared build; the
+  no-publish GoReleaser build no longer requires the tap token a second time.
 - `access.json` and `apns.json` now use exact schema-v1 envelopes with pinned
   identities and fingerprints. Missing, stale, partial, or extended files fail
   instead of receiving defaults or repair; explicit commands write complete
@@ -182,5 +184,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Builds no longer depend on an absolute local path: the temporary
   `cc-interact` replace is the relative sibling checkout, which CI clones.
 
-[Unreleased]: https://github.com/yasyf/cc-runtime/compare/v0.9.0...HEAD
-[0.9.0]: https://github.com/yasyf/cc-runtime/compare/v0.8.0...v0.9.0
+[Unreleased]: https://github.com/yasyf/cc-runtime/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/yasyf/cc-runtime/compare/v0.9.0...v0.10.0
