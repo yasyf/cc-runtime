@@ -61,12 +61,6 @@ homebrew_casks:
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     homepage: https://github.com/yasyf/cc-runtime
     description: Persistent remote delivery for Claude Code questions and notifications.
-    hooks:
-      post:
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/cc-runtime"]
-          end
 
 release:
   prerelease: auto
