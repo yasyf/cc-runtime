@@ -43,9 +43,11 @@ The client kit, unit-tested end to end:
 - `PairPayload` decodes the `cc-runtime pair` QR into its `v`, `name`, `urls`,
   `token`, and `fp` fields, rejecting any version but 1. `urls` is the ordered
   candidate list, and `fp` is the optional LAN-leg certificate fingerprint.
-- `Machine`, `MachineStore`, and `TokenStore` hold the paired-daemon roster as JSON
-  under Application Support, with each bearer token kept in the Keychain.
-  `forget(id:)` drops both the roster entry and the token.
+- `Machine`, `MachineStore`, and `TokenStore` hold the paired-daemon roster in an
+  exact, fingerprinted schema-v1 JSON envelope under Application Support, with
+  each bearer token kept in the Keychain. Legacy, partial, or extended roster
+  files fail instead of being imported or repaired. `forget(id:)` drops both the
+  roster entry and the token.
 - `EndpointProber` sequences a machine's candidate URLs and returns the first that
   answers `GET /api/sessions`. Each leg carries its own TLS handling. An IP-literal
   LAN leg pins to `fp`, while the tailnet leg uses system trust.

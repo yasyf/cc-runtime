@@ -89,9 +89,138 @@ public struct Machine: Codable, Equatable, Sendable, Identifiable {
     }
 }
 
+private let machineStateIdentity = "dev.yasyf.cc-runtime.machines"
+private let machineStateVersion = 1
+/// SHA-256 of identity, NUL, and the exact v1 schema declaration.
+private let machineStateFingerprint = "0b69553ff8c2f9f2168dfd37020e7d312eb5bae38321449e8236b62883d46ab0"
+
+private struct AnyCodingKey: CodingKey {
+    let stringValue: String
+    let intValue: Int? = nil
+
+    init?(stringValue: String) {
+        self.stringValue = stringValue
+    }
+
+    init?(intValue _: Int) {
+        nil
+    }
+}
+
+private func requireExactKeys(_ decoder: Decoder, _ expected: Set<String>) throws {
+    let container = try decoder.container(keyedBy: AnyCodingKey.self)
+    let actual = Set(container.allKeys.map(\.stringValue))
+    guard actual == expected else {
+        let missing = expected.subtracting(actual).sorted()
+        let unknown = actual.subtracting(expected).sorted()
+        throw DecodingError.dataCorrupted(.init(
+            codingPath: decoder.codingPath,
+            debugDescription: "exact object keys mismatch: missing=\(missing), unknown=\(unknown)"
+        ))
+    }
+}
+
+private struct MachineStateSchema: Codable {
+    let identity: String
+    let version: Int
+    let fingerprint: String
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case identity, version, fingerprint
+    }
+
+    init() {
+        identity = machineStateIdentity
+        version = machineStateVersion
+        fingerprint = machineStateFingerprint
+    }
+
+    init(from decoder: Decoder) throws {
+        try requireExactKeys(decoder, Set(CodingKeys.allCases.map(\.rawValue)))
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        identity = try container.decode(String.self, forKey: .identity)
+        version = try container.decode(Int.self, forKey: .version)
+        fingerprint = try container.decode(String.self, forKey: .fingerprint)
+        guard identity == machineStateIdentity,
+              version == machineStateVersion,
+              fingerprint == machineStateFingerprint
+        else {
+            throw DecodingError.dataCorrupted(.init(
+                codingPath: decoder.codingPath,
+                debugDescription: "machines state schema mismatch"
+            ))
+        }
+    }
+}
+
+private struct PersistedMachine: Codable {
+    let id: String
+    let name: String
+    let urls: [URL]
+    let fingerprint: String?
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case id, name, urls, fingerprint
+    }
+
+    init(_ machine: Machine) {
+        id = machine.id
+        name = machine.name
+        urls = machine.urls
+        fingerprint = machine.fingerprint
+    }
+
+    init(from decoder: Decoder) throws {
+        try requireExactKeys(decoder, Set(CodingKeys.allCases.map(\.rawValue)))
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        urls = try container.decode([URL].self, forKey: .urls)
+        fingerprint = try container.decode(String?.self, forKey: .fingerprint)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(urls, forKey: .urls)
+        if let fingerprint {
+            try container.encode(fingerprint, forKey: .fingerprint)
+        } else {
+            try container.encodeNil(forKey: .fingerprint)
+        }
+    }
+
+    var machine: Machine {
+        Machine(id: id, name: name, urls: urls, fingerprint: fingerprint)
+    }
+}
+
+private struct MachineStateEnvelope: Codable {
+    let schema: MachineStateSchema
+    let machines: [PersistedMachine]
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case schema, machines
+    }
+
+    init(_ machines: [Machine]) {
+        schema = MachineStateSchema()
+        self.machines = machines.map(PersistedMachine.init)
+    }
+
+    init(from decoder: Decoder) throws {
+        try requireExactKeys(decoder, Set(CodingKeys.allCases.map(\.rawValue)))
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schema = try container.decode(MachineStateSchema.self, forKey: .schema)
+        machines = try container.decode([PersistedMachine].self, forKey: .machines)
+    }
+}
+
 /// MachineStore persists the paired-machine roster as JSON in an injected
-/// directory. Production points it at Application Support via `defaultDirectory`;
-/// tests point it at a temp directory so they never touch the real store.
+/// directory using one exact, fingerprinted v1 envelope. Production points it
+/// at Application Support via `defaultDirectory`; tests point it at a temp
+/// directory so they never touch the real store.
 public struct MachineStore: Sendable {
     private let fileURL: URL
 
@@ -118,7 +247,7 @@ public struct MachineStore: Sendable {
     public func load() throws -> [Machine] {
         guard FileManager.default.fileExists(atPath: fileURL.path) else { return [] }
         let data = try Data(contentsOf: fileURL)
-        return try JSONDecoder().decode([Machine].self, from: data)
+        return try JSONDecoder().decode(MachineStateEnvelope.self, from: data).machines.map(\.machine)
     }
 
     /// save writes the roster atomically, creating the directory if needed.
@@ -127,7 +256,9 @@ public struct MachineStore: Sendable {
             at: fileURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        let data = try JSONEncoder().encode(machines)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(MachineStateEnvelope(machines))
         try data.write(to: fileURL, options: .atomic)
     }
 

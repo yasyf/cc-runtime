@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cc-runtime's presence-routing opt-out moved to its own fingerprinted
   `~/.cc-runtime/route.json`; neither state accepts legacy keys, imports old
   shapes, or repairs a mismatched schema.
+- The iOS paired-machine roster now uses one exact, fingerprinted schema-v1
+  envelope. Bare arrays and partial, extended, or mismatched envelopes fail
+  instead of being imported or repaired.
 
 ### Added
 - A machine mesh, built on synckit's shared host registry, not a
