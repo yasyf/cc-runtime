@@ -1,7 +1,7 @@
 {
   "name": "cc-runtime",
   "description": "Backs Claude Code's harness-injected tools — AskUserQuestion, PushNotification, and more — with implementations that outlive a single prompt: questions and notifications carry full context, reach you on a web app or phone, and persist for the session.",
-  "version": "0.5.1",
+  "version": "0.6.1",
   "author": {
     "name": "Yasyf Mohamedali",
     "email": "yasyfm@gmail.com"
