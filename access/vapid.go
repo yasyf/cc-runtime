@@ -1,7 +1,6 @@
 package access
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -9,6 +8,7 @@ import (
 	"path/filepath"
 
 	webpush "github.com/SherClockHolmes/webpush-go"
+	"github.com/yasyf/daemonkit/daemon"
 )
 
 // VAPIDKeys is the daemon's Web Push application-server keypair (RFC 8292).
@@ -32,8 +32,13 @@ func (s Store) EnsureVAPID() (VAPIDKeys, error) {
 	if err != nil {
 		return VAPIDKeys{}, fmt.Errorf("read vapid keys %q: %w", s.VAPIDPath(), err)
 	}
-	var k VAPIDKeys
-	if err := json.Unmarshal(b, &k); err != nil {
+	k, err := decodePersisted[VAPIDKeys](
+		b,
+		s.VAPIDPath(),
+		vapidConfigSchemaIdentity,
+		vapidConfigSchemaFingerprint,
+	)
+	if err != nil {
 		return VAPIDKeys{}, fmt.Errorf("parse vapid keys %q: %w", s.VAPIDPath(), err)
 	}
 	if k.Public == "" || k.Private == "" {
@@ -53,11 +58,11 @@ func (s Store) mintVAPID() (VAPIDKeys, error) {
 	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
 		return VAPIDKeys{}, err
 	}
-	b, err := json.Marshal(k)
+	b, err := encodePersisted(vapidConfigSchemaIdentity, vapidConfigSchemaFingerprint, k)
 	if err != nil {
 		return VAPIDKeys{}, err
 	}
-	if err := os.WriteFile(s.VAPIDPath(), b, 0o600); err != nil {
+	if err := daemon.WriteFileDurable(s.VAPIDPath(), b, 0o600); err != nil {
 		return VAPIDKeys{}, fmt.Errorf("write vapid keys %q: %w", s.VAPIDPath(), err)
 	}
 	return k, nil

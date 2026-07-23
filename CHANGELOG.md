@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   identities and fingerprints. Missing, stale, partial, or extended files fail
   instead of receiving defaults or repair; explicit commands write complete
   current state.
+- `vapid.json` now uses an exact schema-v1 envelope with a pinned identity and
+  fingerprint. Bare, stale, partial, extended, or mismatched key files fail
+  loudly, and freshly minted keypairs publish with a durable atomic replace.
 - The shared host registry now uses Synckit's exact schema-v1 state contract.
   cc-runtime's presence-routing opt-out moved to its own fingerprinted
   `~/.cc-runtime/route.json`; neither state accepts legacy keys, imports old

@@ -1,7 +1,9 @@
 package access
 
 import (
+	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -24,6 +26,18 @@ func TestEnsureVAPIDMintsOnceAndPersists(t *testing.T) {
 	}
 	if got := info.Mode().Perm(); got != 0o600 {
 		t.Fatalf("vapid file mode = %o, want 600", got)
+	}
+	written, err := os.ReadFile(st.VAPIDPath())
+	if err != nil {
+		t.Fatalf("read persisted VAPID keys: %v", err)
+	}
+	var envelope persistedEnvelope[VAPIDKeys]
+	if err := json.Unmarshal(written, &envelope); err != nil {
+		t.Fatalf("decode persisted VAPID envelope: %v", err)
+	}
+	if envelope.Schema != vapidConfigSchemaIdentity || envelope.SchemaVersion != persistedSchemaVersion ||
+		envelope.SchemaFingerprint != vapidConfigSchemaFingerprint || envelope.Payload != first {
+		t.Fatalf("persisted VAPID envelope = %+v, want exact v1 envelope for %+v", envelope, first)
 	}
 
 	second, err := st.EnsureVAPID()
@@ -49,7 +63,14 @@ func TestEnsureVAPIDFailsOnBadFile(t *testing.T) {
 		content string
 	}{
 		{id: "corrupt json", content: "{not json"},
-		{id: "missing key material", content: `{"public":"","private":""}`},
+		{id: "legacy bare keys", content: `{"public":"public","private":"private"}`},
+		{id: "extra envelope field", content: strings.TrimSuffix(validVAPIDEnvelope(t), "}") + `,"legacy":true}`},
+		{id: "extra payload field", content: strings.Replace(validVAPIDEnvelope(t), `"private":"private"`, `"private":"private","legacy":true`, 1)},
+		{id: "wrong identity", content: strings.Replace(validVAPIDEnvelope(t), vapidConfigSchemaIdentity, "foreign", 1)},
+		{id: "wrong version", content: strings.Replace(validVAPIDEnvelope(t), `"schemaVersion":1`, `"schemaVersion":2`, 1)},
+		{id: "wrong fingerprint", content: strings.Replace(validVAPIDEnvelope(t), vapidConfigSchemaFingerprint, "foreign", 1)},
+		{id: "trailing value", content: validVAPIDEnvelope(t) + `{}`},
+		{id: "missing key material", content: strings.Replace(validVAPIDEnvelope(t), `"public":"public"`, `"public":""`, 1)},
 	} {
 		t.Run(tc.id, func(t *testing.T) {
 			st := Store{Dir: t.TempDir()}
@@ -61,4 +82,17 @@ func TestEnsureVAPIDFailsOnBadFile(t *testing.T) {
 			}
 		})
 	}
+}
+
+func validVAPIDEnvelope(t *testing.T) string {
+	t.Helper()
+	b, err := encodePersisted(
+		vapidConfigSchemaIdentity,
+		vapidConfigSchemaFingerprint,
+		VAPIDKeys{Public: "public", Private: "private"},
+	)
+	if err != nil {
+		t.Fatalf("encode valid VAPID envelope: %v", err)
+	}
+	return string(b)
 }

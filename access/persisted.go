@@ -18,6 +18,10 @@ const (
 	apnsConfigSchemaIdentity    = "dev.yasyf.cc-runtime.apns"
 	apnsConfigSchemaDescriptor  = "payload{bundleId:string,keyId:string,keyPath:string,sandbox:bool,teamId:string}"
 	apnsConfigSchemaFingerprint = "dev.yasyf.cc-runtime.apns.58cf93d92743c92c13f1134a9b38770877117f8c048e2b80b44980a0f7f436b1"
+
+	vapidConfigSchemaIdentity    = "dev.yasyf.cc-runtime.vapid"
+	vapidConfigSchemaDescriptor  = "payload{private:string,public:string}"
+	vapidConfigSchemaFingerprint = "dev.yasyf.cc-runtime.vapid.b8a47054d57122ca76211caa9f55303f612cecd9796a233551998d48ac3e1591"
 )
 
 type persistedEnvelope[Payload any] struct {

@@ -25,6 +25,12 @@ func TestPersistedSchemaFingerprints(t *testing.T) {
 			descriptor:  apnsConfigSchemaDescriptor,
 			fingerprint: apnsConfigSchemaFingerprint,
 		},
+		{
+			name:        "vapid",
+			identity:    vapidConfigSchemaIdentity,
+			descriptor:  vapidConfigSchemaDescriptor,
+			fingerprint: vapidConfigSchemaFingerprint,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			digest := sha256.Sum256([]byte(tc.identity + "\x00v1\x00" + tc.descriptor))
