@@ -1,0 +1,76 @@
+version: 2
+
+project_name: cc-runtime
+
+before:
+  hooks:
+    - bash -c 'cd web && npm ci && npm run build'
+    - go mod tidy
+
+builds:
+  - id: cc-runtime
+    main: .
+    binary: cc-runtime
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      # The plugin installer accepts the exact v-prefixed tag and its bare form.
+      - -X github.com/yasyf/cc-runtime/version.Version={{ .Tag }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: binary
+    ids: [cc-runtime]
+    formats: [binary]
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+  - id: archive
+    ids: [cc-runtime]
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+notarize:
+  macos:
+    - enabled: '{{ if envOrDefault "MACOS_SIGN_P12" "" }}true{{ else }}false{{ end }}'
+      ids: [cc-runtime]
+      sign:
+        certificate: "{{ .Env.MACOS_SIGN_P12 }}"
+        password: "{{ .Env.MACOS_SIGN_PASSWORD }}"
+      notarize:
+        issuer_id: "{{ .Env.MACOS_NOTARY_ISSUER_ID }}"
+        key_id: "{{ .Env.MACOS_NOTARY_KEY_ID }}"
+        key: "{{ .Env.MACOS_NOTARY_KEY }}"
+        wait: true
+        timeout: 20m
+
+checksum:
+  name_template: checksums.txt
+
+homebrew_casks:
+  - name: cc-runtime
+    ids: [archive]
+    binaries: [cc-runtime]
+    repository:
+      owner: yasyf
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    homepage: https://github.com/yasyf/cc-runtime
+    description: Persistent remote delivery for Claude Code questions and notifications.
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/cc-runtime"]
+          end
+
+release:
+  prerelease: auto
+  replace_existing_artifacts: true
+
+changelog:
+  use: github
+  sort: asc

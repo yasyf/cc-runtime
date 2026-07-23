@@ -1,3 +1,4 @@
 package version
 
-const Version = "0.0.0"
+// Version is the release version stamped at build time.
+var Version = "dev"

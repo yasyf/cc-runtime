@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   identities and fingerprints. Missing, stale, partial, or extended files fail
   instead of receiving defaults or repair; explicit commands write complete
   current state.
+- The shared host registry now uses Synckit's exact schema-v1 state contract.
+  cc-runtime's presence-routing opt-out moved to its own fingerprinted
+  `~/.cc-runtime/route.json`; neither state accepts legacy keys, imports old
+  shapes, or repairs a mismatched schema.
 
 ### Added
 - A machine mesh, built on synckit's shared host registry, not a
@@ -50,9 +54,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is attended when this user owns an unlocked, unmirrored session — read via
   synckit's `presence` probe (`ioreg` and `netstat` on macOS,
   unattended-with-a-reason elsewhere). `cc-runtime mesh route off` persists an
-  opt-out in the shared synckit state under a cc-runtime-owned key (synckit
-  preserves it byte-for-byte across its own writes) without dropping the peers;
-  routing is on by default wherever peers exist.
+  opt-out in cc-runtime's exact `~/.cc-runtime/route.json` without dropping the
+  shared peers; routing is on by default wherever peers exist.
 - Direct APNs delivery. `cc-runtime apns set --key <path>.p8 --key-id X
   --team-id Y --bundle-id Z` enables the lane, `--sandbox` targets Apple's
   sandbox environment, and `apns off` disables it. The daemon authenticates
