@@ -2,11 +2,14 @@ package processowner
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/yasyf/daemonkit/proc"
+	"github.com/yasyf/daemonkit/worker"
 )
 
 func TestIsolatedOwnersRunConcurrently(t *testing.T) {
@@ -44,10 +47,11 @@ func TestIsolatedOwnerRecoversOrphanedGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	record := ownerRecord{
-		Schema: ownerSchemaV1, Generation: "orphan", Store: "orphan.db",
+		Schema: ownerSchemaV1, Generation: proc.OwnerGeneration{1},
 		Identity: proc.Identity{PID: os.Getpid(), StartTime: "dead", Boot: "old", Comm: "cc-runtime"},
 	}
-	recordPath := filepath.Join(root, "orphan.json")
+	record.Store = record.Generation.String() + ".db"
+	recordPath := filepath.Join(root, record.Generation.String()+".json")
 	if err := writeRecord(root, recordPath, record); err != nil {
 		t.Fatalf("write orphan: %v", err)
 	}
@@ -62,5 +66,43 @@ func TestIsolatedOwnerRecoversOrphanedGeneration(t *testing.T) {
 	}
 	if err := owner.Close(context.Background()); err != nil {
 		t.Fatalf("Close: %v", err)
+	}
+}
+
+func TestOwnerCloseSettlesBeforeExplicitRecovery(t *testing.T) {
+	owner, err := New(t.TempDir(), "workers.db", 1)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := owner.Close(t.Context()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+func TestOwnerOpensAdmissionOnlyAfterRecovery(t *testing.T) {
+	owner, err := New(t.TempDir(), "workers.db", 1)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := owner.Close(context.Background()); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
+	request := worker.CommandRequest{
+		Path: "/bin/sh", Dir: "/bin", Args: []string{"-c", "printf ready"}, TotalTimeout: time.Minute,
+	}
+	if _, err := owner.Runner().Run(t.Context(), request); !errors.Is(err, worker.ErrRuntimeOwnership) {
+		t.Fatalf("run before recovery = %v", err)
+	}
+	if err := owner.Recover(t.Context()); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	result, err := owner.Runner().Run(t.Context(), request)
+	if err != nil {
+		t.Fatalf("run after recovery: %v", err)
+	}
+	if string(result.Stdout) != "ready" {
+		t.Fatalf("stdout = %q", result.Stdout)
 	}
 }

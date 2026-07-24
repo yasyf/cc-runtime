@@ -3,71 +3,71 @@ package mesh
 import (
 	"context"
 	"errors"
-	"io"
-	"slices"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yasyf/daemonkit/proc"
-	"github.com/yasyf/daemonkit/supervise"
+	"github.com/yasyf/daemonkit/worker"
 )
 
-type recordingTaskRunner struct {
-	task   supervise.Task
-	stdin  string
-	stdout string
-	stderr string
-	err    error
-}
-
-func (r *recordingTaskRunner) Run(_ context.Context, task supervise.Task) error {
-	r.task = task
-	if task.Stdin != nil {
-		payload, err := io.ReadAll(task.Stdin)
-		if err != nil {
-			return err
-		}
-		r.stdin = string(payload)
-		_ = task.Stdin.Close()
-	}
-	if task.Stdout != nil {
-		_, _ = io.WriteString(task.Stdout, r.stdout)
-	}
-	if task.Stderr != nil {
-		_, _ = io.WriteString(task.Stderr, r.stderr)
-	}
-	return r.err
-}
-
 func TestExecRunnerLocalUsesDurableTaskOwner(t *testing.T) {
-	owner := &recordingTaskRunner{stdout: "reply\n"}
-	out, err := NewExecRunner(owner).Local(context.Background(), []byte("request\n"), "cc-runtime", "rpc", "status")
+	pool := testWorkerPool(t)
+	out, err := NewExecRunner(pool).Local(context.Background(), []byte("request\n"), "/bin/sh", "-c", "cat")
 	if err != nil {
 		t.Fatalf("Local: %v", err)
 	}
-	if out != "reply\n" {
+	if out != "request\n" {
 		t.Fatalf("stdout = %q", out)
-	}
-	if owner.task.RecoveryClass != proc.RecoveryTask || owner.task.Path != "cc-runtime" ||
-		!slices.Equal(owner.task.Args, []string{"rpc", "status"}) || owner.stdin != "request\n" {
-		t.Fatalf("task = %+v stdin=%q", owner.task, owner.stdin)
 	}
 }
 
-func TestExecRunnerSSHOncePreservesSingleAttemptAndFailure(t *testing.T) {
-	sentinel := errors.New("exit 23")
-	owner := &recordingTaskRunner{stdout: "partial", stderr: "remote failed\n", err: sentinel}
-	out, err := NewExecRunner(owner).SSHOnce(
-		context.Background(), "alice@peer.tail.ts.net", "cc-runtime rpc interaction.notify --json -", []byte("payload"),
+func TestExecRunnerLocalPreservesOutputAndTypedFailure(t *testing.T) {
+	pool := testWorkerPool(t)
+	out, err := NewExecRunner(pool).Local(
+		context.Background(), []byte("partial"), "/bin/sh", "-c", "cat; printf 'remote failed\\n' >&2; exit 23",
 	)
-	if out != "partial" || !errors.Is(err, sentinel) || !strings.Contains(err.Error(), "remote failed") {
-		t.Fatalf("SSHOnce = (%q, %v)", out, err)
+	var exit *worker.ExitError
+	if out != "partial" || !errors.As(err, &exit) || exit.ExitCode != 23 || !strings.Contains(err.Error(), "remote failed") {
+		t.Fatalf("Local = (%q, %v)", out, err)
 	}
-	if owner.task.Path != "ssh" || owner.stdin != "payload" {
-		t.Fatalf("task = %+v stdin=%q", owner.task, owner.stdin)
+}
+
+func TestExecRunnerSSHOnceRejectsImplicitTarget(t *testing.T) {
+	pool := testWorkerPool(t)
+	if _, err := NewExecRunner(pool).SSHOnce(context.Background(), "peer", "true", nil); err == nil {
+		t.Fatal("SSHOnce accepted target without explicit user")
 	}
-	joined := strings.Join(owner.task.Args, " ")
-	if !strings.Contains(joined, "alice@peer.tail.ts.net") || !strings.Contains(joined, "interaction.notify") {
-		t.Fatalf("ssh args = %q", joined)
+}
+
+func testWorkerPool(t *testing.T) *worker.Pool {
+	t.Helper()
+	pool, err := worker.NewPool(worker.Config{
+		Capacity: 2, QueueCapacity: 2, MaxTotalRun: runnerCommandTimeout,
+		MaxStdinBytes: 1 << 20, MaxStdoutBytes: 1 << 20, MaxStderrBytes: 1 << 20,
+	}, &proc.Reaper{
+		Store: &proc.FileStore{Path: filepath.Join(t.TempDir(), "workers.db")}, Generation: proc.OwnerGeneration{1},
+	})
+	if err != nil {
+		t.Fatalf("NewPool: %v", err)
 	}
+	claim, err := pool.ClaimRuntime()
+	if err != nil {
+		t.Fatalf("ClaimRuntime: %v", err)
+	}
+	if err := claim.Recover(t.Context()); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	if err := claim.Activate(); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := claim.Close(ctx); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
+	return claim.Product()
 }

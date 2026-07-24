@@ -4,7 +4,6 @@ package processowner
 import (
 	"context"
 	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,31 +11,42 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/yasyf/daemonkit/proc"
-	"github.com/yasyf/daemonkit/supervise"
+	"github.com/yasyf/daemonkit/worker"
 )
 
 const (
-	lockWait      = 30 * time.Second
-	ownerSchemaV1 = 1
+	lockWait           = 30 * time.Second
+	settlementTimeout  = 30 * time.Second
+	commandTimeout     = 12 * time.Minute
+	commandInputLimit  = 16 << 20
+	commandOutputLimit = 16 << 20
+	commandErrorLimit  = 1 << 20
+	ownerSchemaV1      = 1
 )
 
 // Owner is one durable disposable-process owner.
 type Owner struct {
-	pool         *supervise.Pool
-	reaper       *proc.Reaper
-	registryRoot string
-	recordPath   string
-	storePath    string
+	mu             sync.Mutex
+	pool           *worker.Pool
+	claim          *worker.RuntimeClaim
+	reaper         *proc.Reaper
+	registryRoot   string
+	recordPath     string
+	storePath      string
+	claimRecovered bool
+	ready          bool
+	closed         bool
 }
 
 type ownerRecord struct {
-	Schema     int           `json:"schema"`
-	Generation string        `json:"generation"`
-	Identity   proc.Identity `json:"identity"`
-	Store      string        `json:"store"`
+	Schema     int                  `json:"schema"`
+	Generation proc.OwnerGeneration `json:"generation"`
+	Identity   proc.Identity        `json:"identity"`
+	Store      string               `json:"store"`
 }
 
 // New creates an owner without recovering prior-generation processes.
@@ -66,7 +76,7 @@ func NewIsolated(ctx context.Context, stateDir, registryName string, limit int) 
 	if err := recoverOrphans(ctx, root, generation, limit); err != nil {
 		return nil, errors.Join(err, lock.Close())
 	}
-	storeName := generation + ".db"
+	storeName := generation.String() + ".db"
 	owner, err := newOwner(filepath.Join(root, storeName), generation, limit)
 	if err != nil {
 		return nil, errors.Join(err, lock.Close())
@@ -79,7 +89,7 @@ func NewIsolated(ctx context.Context, stateDir, registryName string, limit int) 
 	record := ownerRecord{
 		Schema: ownerSchemaV1, Generation: generation, Identity: identity, Store: storeName,
 	}
-	recordPath := filepath.Join(root, generation+".json")
+	recordPath := filepath.Join(root, generation.String()+".json")
 	if err := writeRecord(root, recordPath, record); err != nil {
 		_ = owner.Close(ctx)
 		return nil, errors.Join(err, lock.Close())
@@ -93,21 +103,31 @@ func NewIsolated(ctx context.Context, stateDir, registryName string, limit int) 
 	return owner, nil
 }
 
-func newOwner(storePath, generation string, limit int) (*Owner, error) {
+func newOwner(storePath string, generation proc.OwnerGeneration, limit int) (*Owner, error) {
 	reaper := &proc.Reaper{Store: &proc.FileStore{Path: storePath}, Generation: generation}
-	pool, err := supervise.NewPool(limit, reaper)
+	pool, err := worker.NewPool(worker.Config{
+		Capacity: limit, QueueCapacity: limit, MaxTotalRun: commandTimeout,
+		MaxStdinBytes: commandInputLimit, MaxStdoutBytes: commandOutputLimit, MaxStderrBytes: commandErrorLimit,
+	}, reaper)
 	if err != nil {
 		return nil, err
 	}
-	return &Owner{pool: pool, reaper: reaper, storePath: storePath}, nil
+	claim, err := pool.ClaimRuntime()
+	if err != nil {
+		return nil, err
+	}
+	return &Owner{pool: pool, claim: claim, reaper: reaper, storePath: storePath}, nil
 }
 
-func randomGeneration() (string, error) {
-	var identity [16]byte
-	if _, err := rand.Read(identity[:]); err != nil {
-		return "", fmt.Errorf("generate process owner identity: %w", err)
+func randomGeneration() (proc.OwnerGeneration, error) {
+	var generation proc.OwnerGeneration
+	if _, err := rand.Read(generation[:]); err != nil {
+		return proc.OwnerGeneration{}, fmt.Errorf("generate process owner identity: %w", err)
 	}
-	return hex.EncodeToString(identity[:]), nil
+	if generation == (proc.OwnerGeneration{}) {
+		return proc.OwnerGeneration{}, errors.New("generate process owner identity: random source returned zero")
+	}
+	return generation, nil
 }
 
 func acquireRegistry(ctx context.Context, root string) (*proc.FileLockHandle, error) {
@@ -120,7 +140,7 @@ func acquireRegistry(ctx context.Context, root string) (*proc.FileLockHandle, er
 	return lock, nil
 }
 
-func recoverOrphans(ctx context.Context, root, generation string, limit int) error {
+func recoverOrphans(ctx context.Context, root string, generation proc.OwnerGeneration, limit int) error {
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return fmt.Errorf("read process registry: %w", err)
@@ -139,7 +159,7 @@ func recoverOrphans(ctx context.Context, root, generation string, limit int) err
 		}
 		live, err := ownerLive(record.Identity)
 		if err != nil {
-			return fmt.Errorf("probe process owner %s: %w", record.Generation, err)
+			return fmt.Errorf("probe process owner %s: %w", record.Generation.String(), err)
 		}
 		if live {
 			continue
@@ -194,8 +214,8 @@ func readRecord(path string) (ownerRecord, error) {
 }
 
 func validateRecord(name string, record ownerRecord) error {
-	if record.Schema != ownerSchemaV1 || record.Generation == "" ||
-		name != record.Generation+".json" || record.Store != record.Generation+".db" ||
+	if record.Schema != ownerSchemaV1 || record.Generation == (proc.OwnerGeneration{}) ||
+		name != record.Generation.String()+".json" || record.Store != record.Generation.String()+".db" ||
 		record.Identity.PID <= 1 || record.Identity.StartTime == "" ||
 		record.Identity.Boot == "" || record.Identity.Comm == "" {
 		return fmt.Errorf("invalid process owner record %q", name)
@@ -256,34 +276,68 @@ func syncDir(path string) error {
 	return dir.Close()
 }
 
-// Runner returns the owner's durable task runner.
-func (o *Owner) Runner() supervise.TaskRunner { return o.pool }
+// Runner returns the owner's durable worker pool.
+func (o *Owner) Runner() *worker.Pool { return o.pool }
 
 // Recover settles every prior-generation process and receipt.
 func (o *Owner) Recover(ctx context.Context) error {
-	if err := o.pool.Recover(ctx); err != nil {
-		return fmt.Errorf("recover processes: %w", err)
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.recoverLocked(ctx)
+}
+
+func (o *Owner) recoverLocked(ctx context.Context) error {
+	if o.closed {
+		return errors.New("process owner is closed")
 	}
-	if _, err := o.reaper.RecoverReapReceipts(ctx, proc.RecoveryTask, func(context.Context, proc.ReapReceipt) error {
+	if o.ready {
+		return nil
+	}
+	if !o.claimRecovered {
+		if err := o.claim.Recover(ctx); err != nil {
+			return fmt.Errorf("recover processes: %w", err)
+		}
+		o.claimRecovered = true
+	}
+	if _, err := o.reaper.RecoverReapReceipts(ctx, proc.RecoveryTaskID, func(context.Context, proc.ReapReceipt) error {
 		return nil
 	}); err != nil {
 		return fmt.Errorf("recover process receipts: %w", err)
 	}
+	if err := o.claim.Activate(); err != nil {
+		return fmt.Errorf("activate process owner: %w", err)
+	}
+	o.ready = true
 	return nil
 }
 
 // Close stops admission, reaps every task, and retires the owner record.
 func (o *Owner) Close(ctx context.Context) error {
-	o.pool.Close()
-	o.pool.Cancel()
-	waitErr := o.pool.Wait(context.WithoutCancel(ctx))
-	if o.registryRoot == "" {
-		return waitErr
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.closed {
+		return nil
 	}
-	lock, lockErr := acquireRegistry(context.WithoutCancel(ctx), o.registryRoot)
+	settleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), settlementTimeout)
+	defer cancel()
+	if err := o.recoverLocked(settleCtx); err != nil {
+		return err
+	}
+	if err := o.claim.Close(settleCtx); err != nil {
+		return err
+	}
+	if o.registryRoot == "" {
+		o.closed = true
+		return nil
+	}
+	lock, lockErr := acquireRegistry(settleCtx, o.registryRoot)
 	if lockErr != nil {
-		return errors.Join(waitErr, lockErr)
+		return lockErr
 	}
 	removeErr := removeOwnerFiles(o.registryRoot, o.recordPath, o.storePath)
-	return errors.Join(waitErr, removeErr, lock.Close())
+	result := errors.Join(removeErr, lock.Close())
+	if result == nil {
+		o.closed = true
+	}
+	return result
 }
