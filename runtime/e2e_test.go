@@ -108,6 +108,10 @@ func waitE2EClient(t *testing.T, launcher daemon.Launcher) *daemon.Client {
 				t.Cleanup(func() { _ = client.Close() })
 				return client
 			}
+			if err != nil {
+				_ = client.Close()
+				client = nil
+			}
 		}
 		if time.Now().After(deadline) {
 			if client != nil {

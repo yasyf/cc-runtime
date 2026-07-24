@@ -77,6 +77,10 @@ func waitReadyClient(t *testing.T, p paths.Paths, runtimeBuild string) *daemon.C
 				t.Cleanup(func() { _ = client.Close() })
 				return client
 			}
+			if err != nil {
+				_ = client.Close()
+				client = nil
+			}
 		}
 		if time.Now().After(deadline) {
 			if client != nil {

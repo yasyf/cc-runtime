@@ -18,10 +18,16 @@ func TestWireMeshAllowsConcurrentScopedTUIs(t *testing.T) {
 	}
 	if _, err := mesh.Config.Update(context.Background(), func(reg *hostregistry.Registry) error {
 		reg.Self = meshSelf
-		reg.Hosts = []string{meshHost}
 		return nil
 	}); err != nil {
 		t.Fatalf("seed mesh: %v", err)
+	}
+	fact, err := hostregistry.NewSSHHostFact(meshHost, "/opt/homebrew/bin/synckitd", nil)
+	if err != nil {
+		t.Fatalf("host fact: %v", err)
+	}
+	if err := mesh.Config.RegisterHost(context.Background(), fact); err != nil {
+		t.Fatalf("register host: %v", err)
 	}
 	stateDir := t.TempDir()
 	first := NewModel("/repo/first", nil, make(chan liveEvent))
