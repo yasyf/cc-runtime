@@ -6,6 +6,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-07-23
+
+### Changed
+- Move durable command ownership and process settlement onto daemonkit's
+  generation-fenced worker runtime, pinned at v0.15.0.
+- Use daemonkit's exact role and trust contracts and Synckit's canonical host
+  registration and SSH execution paths.
+
+### Fixed
+- Persist, deduplicate, and replay routed notification deliveries across
+  daemon restarts without duplicating completed sends.
+- Reconnect readiness probes after a pre-ready session rejection and register
+  TUI test peers through Synckit's required new-host path.
+
 ## [0.11.0] - 2026-07-23
 
 ### Fixed
