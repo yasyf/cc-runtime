@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-07-24
+
+### Changed
+- Pin daemonkit v0.17.2 and cc-interact v0.28.0, routing every HTTP product
+  request through the ready publication acquired by daemon dispatch.
+- Bind interaction, Web Push, and APNs request handlers and their immutable
+  configuration into the published server graph.
+
 ## [0.13.1] - 2026-07-23
 
 ### Fixed
@@ -217,7 +225,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Builds no longer depend on an absolute local path: the temporary
   `cc-interact` replace is the relative sibling checkout, which CI clones.
 
-[Unreleased]: https://github.com/yasyf/cc-runtime/compare/v0.13.1...HEAD
+[Unreleased]: https://github.com/yasyf/cc-runtime/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/yasyf/cc-runtime/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/yasyf/cc-runtime/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/yasyf/cc-runtime/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/yasyf/cc-runtime/compare/v0.11.0...v0.12.0

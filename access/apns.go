@@ -27,6 +27,7 @@ import (
 const (
 	EventPushDeviceRegister   = "push.device_register"
 	EventPushDeviceUnregister = "push.device_unregister"
+	opPushDeviceRegister      = daemon.Op("access.push.device-register")
 )
 
 // APNs delivery hosts; Sandbox in APNSConfig picks the second.
@@ -156,10 +157,21 @@ func NewAPNSSender(cfg APNSConfig, db *sql.DB, append daemon.AppendFunc) (*APNSS
 // passes and refreshes created_at, so a delayed invalidation can be ordered
 // against it.
 func (a *APNSSender) Register(ctx context.Context, token, platform string) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	return registerDeviceToken(ctx, a.db, a.append, &a.mu, a.now, token, platform)
+}
+
+func registerDeviceToken(
+	ctx context.Context,
+	db *sql.DB,
+	append daemon.AppendFunc,
+	mu *sync.Mutex,
+	now func() time.Time,
+	token, platform string,
+) error {
+	mu.Lock()
+	defer mu.Unlock()
 	var others int
-	if err := a.db.QueryRowContext(ctx,
+	if err := db.QueryRowContext(ctx,
 		`SELECT count(*) FROM apns_device_tokens WHERE token<>?`, token).Scan(&others); err != nil {
 		return fmt.Errorf("count device tokens: %w", err)
 	}
@@ -170,16 +182,16 @@ func (a *APNSSender) Register(ctx context.Context, token, platform string) error
 	if err != nil {
 		return err
 	}
-	if _, err := a.append(ctx, &event.Event{
+	if _, err := append(ctx, &event.Event{
 		SubjectID: PushSubjectID, Origin: event.OriginHuman, Type: EventPushDeviceRegister,
 		Payload: frame, DedupKey: "device:" + token,
 	}); err != nil {
 		return fmt.Errorf("append device registration: %w", err)
 	}
-	if _, err := a.db.ExecContext(ctx,
+	if _, err := db.ExecContext(ctx,
 		`INSERT INTO apns_device_tokens(token, platform, created_at) VALUES(?,?,?)
 		 ON CONFLICT(token) DO UPDATE SET platform=excluded.platform, created_at=excluded.created_at`,
-		token, platform, a.now().UnixMilli()); err != nil {
+		token, platform, now().UnixMilli()); err != nil {
 		return fmt.Errorf("project device token: %w", err)
 	}
 	return nil
@@ -378,12 +390,62 @@ func apnsFailure(r io.Reader) (reason string, timestamp int64) {
 	return body.Reason, body.Timestamp
 }
 
+type apnsHandlers struct {
+	mu    sync.Mutex
+	now   func() time.Time
+	token string
+}
+
+type deviceRegistrationReply struct {
+	OK      bool `json:"ok,omitempty"`
+	Limited bool `json:"limited,omitempty"`
+}
+
+type deviceRegistrationRequest struct {
+	Token    string `json:"token"`
+	Platform string `json:"platform"`
+	Bearer   string `json:"bearer"`
+}
+
+// RegisterAPNS binds device registration into the published daemon graph.
+func RegisterAPNS(server *daemon.Server, token string) {
+	h := &apnsHandlers{now: time.Now, token: token}
+	server.Register(opPushDeviceRegister, h.handleRegister)
+}
+
+func (h *apnsHandlers) handleRegister(hc daemon.HandlerCtx) daemon.Reply {
+	var request deviceRegistrationRequest
+	if err := json.Unmarshal(hc.Env.Body, &request); err != nil {
+		return daemon.Reply{OK: false, Error: "bad registration: " + err.Error()}
+	}
+	if !bearerMatches(request.Bearer, h.token) {
+		return daemon.Reply{OK: false, Error: "unauthorized"}
+	}
+	reg := deviceRegistration{Token: request.Token, Platform: request.Platform}
+	if err := validateDeviceRegistration(reg); err != nil {
+		return daemon.Reply{OK: false, Error: err.Error()}
+	}
+	if err := registerDeviceToken(hc.Ctx, hc.DB, hc.Append, &h.mu, h.now, reg.Token, reg.Platform); err != nil {
+		if errors.Is(err, ErrDeviceTokenLimit) {
+			body, _ := json.Marshal(deviceRegistrationReply{Limited: true})
+			return daemon.Reply{OK: false, Error: err.Error(), Body: body}
+		}
+		return daemon.Reply{OK: false, Error: err.Error()}
+	}
+	body, _ := json.Marshal(deviceRegistrationReply{OK: true})
+	return daemon.Reply{OK: true, Body: body}
+}
+
 // MountAPNS mounts device-token registration on the daemon's auth-guarded
 // mux, mirroring MountPush — but it re-checks the pair bearer itself: the
 // daemon's auth layer admits tokenless loopback peers, and a registration is
 // a durable remote delivery grant no local process may mint without the
 // token. With no token minted yet, every registration is refused.
-func MountAPNS(mux *http.ServeMux, sender *APNSSender, token string) {
+func MountAPNS(server *daemon.Server, token string) {
+	mountAPNS(server.Mux(), server.Dispatch, token)
+}
+
+func mountAPNS(mux *http.ServeMux, dispatch daemonDispatch, token string) {
 	mux.HandleFunc("POST /api/push/device-tokens", func(w http.ResponseWriter, r *http.Request) {
 		if !bearerAuthorized(r, token) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -404,26 +466,45 @@ func MountAPNS(mux *http.ServeMux, sender *APNSSender, token string) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if err := sender.Register(r.Context(), reg.Token, reg.Platform); err != nil {
-			if errors.Is(err, ErrDeviceTokenLimit) {
-				http.Error(w, err.Error(), http.StatusTooManyRequests)
-				return
-			}
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+		body, err := json.Marshal(deviceRegistrationRequest{
+			Token: reg.Token, Platform: reg.Platform, Bearer: token,
+		})
+		if err != nil {
+			http.Error(w, "encode registration: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, map[string]bool{"ok": true})
+		reply := dispatch(r.Context(), daemon.Envelope{Op: opPushDeviceRegister, Body: body})
+		var result deviceRegistrationReply
+		if len(reply.Body) > 0 {
+			if err := json.Unmarshal(reply.Body, &result); err != nil {
+				http.Error(w, "decode registration reply: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		if !reply.OK {
+			if result.Limited {
+				http.Error(w, reply.Error, http.StatusTooManyRequests)
+				return
+			}
+			http.Error(w, reply.Error, http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, result)
 	})
 }
 
 // bearerAuthorized reports whether r presents the pair bearer token, comparing
 // SHA-256 digests in constant time so a length mismatch cannot be timed.
 func bearerAuthorized(r *http.Request, token string) bool {
-	if token == "" {
-		return false
-	}
 	candidate, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if !ok {
+		return false
+	}
+	return bearerMatches(candidate, token)
+}
+
+func bearerMatches(candidate, token string) bool {
+	if token == "" {
 		return false
 	}
 	c := sha256.Sum256([]byte(candidate))

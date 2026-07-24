@@ -32,6 +32,8 @@ const PushSubjectID = "push"
 const (
 	EventPushSubscribe   = "push.subscribe"
 	EventPushUnsubscribe = "push.unsubscribe"
+	opPushVAPIDKey       = daemon.Op("access.push.vapid-key")
+	opPushSubscribe      = daemon.Op("access.push.subscribe")
 )
 
 // PushUrgencyHigh is the RFC 8030 urgency for frames that must reach a device
@@ -129,10 +131,14 @@ func NewPushSender(keys VAPIDKeys, db *sql.DB, append daemon.AppendFunc) *PushSe
 // maxSubscriptions is refused (ErrSubscriptionLimit); re-registering a stored
 // endpoint always passes.
 func (p *PushSender) Subscribe(ctx context.Context, sub webpush.Subscription) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	return subscribe(ctx, p.db, p.append, &p.mu, sub)
+}
+
+func subscribe(ctx context.Context, db *sql.DB, append daemon.AppendFunc, mu *sync.Mutex, sub webpush.Subscription) error {
+	mu.Lock()
+	defer mu.Unlock()
 	var others int
-	if err := p.db.QueryRowContext(ctx,
+	if err := db.QueryRowContext(ctx,
 		`SELECT count(*) FROM push_subscriptions WHERE endpoint<>?`, sub.Endpoint).Scan(&others); err != nil {
 		return fmt.Errorf("count push subscriptions: %w", err)
 	}
@@ -143,7 +149,7 @@ func (p *PushSender) Subscribe(ctx context.Context, sub webpush.Subscription) er
 	if err != nil {
 		return err
 	}
-	if _, err := p.append(ctx, &event.Event{
+	if _, err := append(ctx, &event.Event{
 		SubjectID: PushSubjectID, Origin: event.OriginHuman, Type: EventPushSubscribe,
 		Payload: frame, DedupKey: "sub:" + sub.Endpoint,
 	}); err != nil {
@@ -153,7 +159,7 @@ func (p *PushSender) Subscribe(ctx context.Context, sub webpush.Subscription) er
 	if err != nil {
 		return err
 	}
-	if _, err := p.db.ExecContext(ctx,
+	if _, err := db.ExecContext(ctx,
 		`INSERT INTO push_subscriptions(endpoint, subscription, created_at) VALUES(?,?,?)
 		 ON CONFLICT(endpoint) DO UPDATE SET subscription=excluded.subscription`,
 		sub.Endpoint, string(subJSON), time.Now().UnixMilli()); err != nil {
@@ -301,12 +307,67 @@ func (p *PushSender) subscriptions(ctx context.Context) ([]webpush.Subscription,
 	return out, rows.Err()
 }
 
-// MountPush mounts the Web Push surface on the daemon's auth-guarded mux: the
-// VAPID public key a client subscribes with, and subscription registration.
-// Endpoint-over-pair-payload rationale: cc-notes 3d24919a.
-func MountPush(mux *http.ServeMux, sender *PushSender) {
+type pushHandlers struct {
+	keys VAPIDKeys
+	mu   sync.Mutex
+}
+
+type pushSubscriptionReply struct {
+	OK      bool `json:"ok,omitempty"`
+	Limited bool `json:"limited,omitempty"`
+}
+
+// RegisterPush binds the Web Push request operations into the published daemon graph.
+func RegisterPush(server *daemon.Server, keys VAPIDKeys) {
+	h := &pushHandlers{keys: keys}
+	server.Register(opPushVAPIDKey, h.handleVAPIDKey)
+	server.Register(opPushSubscribe, h.handleSubscribe)
+}
+
+func (h *pushHandlers) handleVAPIDKey(daemon.HandlerCtx) daemon.Reply {
+	body, _ := json.Marshal(map[string]string{"key": h.keys.Public})
+	return daemon.Reply{OK: true, Body: body}
+}
+
+func (h *pushHandlers) handleSubscribe(hc daemon.HandlerCtx) daemon.Reply {
+	var sub webpush.Subscription
+	if err := json.Unmarshal(hc.Env.Body, &sub); err != nil {
+		return daemon.Reply{OK: false, Error: "bad subscription: " + err.Error()}
+	}
+	if err := validateSubscription(sub); err != nil {
+		return daemon.Reply{OK: false, Error: err.Error()}
+	}
+	if err := subscribe(hc.Ctx, hc.DB, hc.Append, &h.mu, sub); err != nil {
+		if errors.Is(err, ErrSubscriptionLimit) {
+			body, _ := json.Marshal(pushSubscriptionReply{Limited: true})
+			return daemon.Reply{OK: false, Error: err.Error(), Body: body}
+		}
+		return daemon.Reply{OK: false, Error: err.Error()}
+	}
+	body, _ := json.Marshal(pushSubscriptionReply{OK: true})
+	return daemon.Reply{OK: true, Body: body}
+}
+
+// MountPush mounts the Web Push surface on the daemon's auth-guarded mux.
+func MountPush(server *daemon.Server) {
+	mountPush(server.Mux(), server.Dispatch)
+}
+
+type daemonDispatch func(context.Context, daemon.Envelope) daemon.Reply
+
+func mountPush(mux *http.ServeMux, dispatch daemonDispatch) {
 	mux.HandleFunc("GET /api/push/vapid-key", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, map[string]string{"key": sender.keys.Public})
+		reply := dispatch(r.Context(), daemon.Envelope{Op: opPushVAPIDKey})
+		if !reply.OK {
+			http.Error(w, reply.Error, http.StatusInternalServerError)
+			return
+		}
+		var body map[string]string
+		if err := json.Unmarshal(reply.Body, &body); err != nil {
+			http.Error(w, "decode VAPID key reply: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, body)
 	})
 	mux.HandleFunc("POST /api/push/subscriptions", func(w http.ResponseWriter, r *http.Request) {
 		if !interaction.RequireJSON(w, r) {
@@ -327,15 +388,28 @@ func MountPush(mux *http.ServeMux, sender *PushSender) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if err := sender.Subscribe(r.Context(), sub); err != nil {
-			if errors.Is(err, ErrSubscriptionLimit) {
-				http.Error(w, err.Error(), http.StatusTooManyRequests)
-				return
-			}
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+		body, err := json.Marshal(sub)
+		if err != nil {
+			http.Error(w, "encode subscription: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, map[string]bool{"ok": true})
+		reply := dispatch(r.Context(), daemon.Envelope{Op: opPushSubscribe, Body: body})
+		var result pushSubscriptionReply
+		if len(reply.Body) > 0 {
+			if err := json.Unmarshal(reply.Body, &result); err != nil {
+				http.Error(w, "decode subscription reply: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		if !reply.OK {
+			if result.Limited {
+				http.Error(w, reply.Error, http.StatusTooManyRequests)
+				return
+			}
+			http.Error(w, reply.Error, http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, result)
 	})
 }
 

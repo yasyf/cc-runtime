@@ -19,6 +19,7 @@ import (
 	"time"
 
 	webpush "github.com/SherClockHolmes/webpush-go"
+	"github.com/yasyf/cc-interact/daemon"
 	"github.com/yasyf/cc-interact/store"
 )
 
@@ -79,8 +80,20 @@ func newPushFixture(t *testing.T) *pushFixture {
 	}
 	client := &fakePushClient{status: map[string]int{}}
 	sender := &PushSender{keys: keys, db: st.DB(), append: st.AppendEvent, client: client}
+	handlers := &pushHandlers{keys: keys}
+	dispatch := func(ctx context.Context, env daemon.Envelope) daemon.Reply {
+		hc := daemon.HandlerCtx{Ctx: ctx, Env: env, DB: st.DB(), Append: st.AppendEvent}
+		switch env.Op {
+		case opPushVAPIDKey:
+			return handlers.handleVAPIDKey(hc)
+		case opPushSubscribe:
+			return handlers.handleSubscribe(hc)
+		default:
+			return daemon.Reply{OK: false, Error: "unknown test op"}
+		}
+	}
 	mux := http.NewServeMux()
-	MountPush(mux, sender)
+	mountPush(mux, dispatch)
 	return &pushFixture{t: t, store: st, sender: sender, client: client, mux: mux}
 }
 

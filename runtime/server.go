@@ -105,7 +105,6 @@ func buildServer(ctx context.Context, policy trust.TrustPolicy, roles daemon.Rol
 		if err := sender.ReconcileGrants(bootCtx, token, acfg.Bind); err != nil {
 			return err
 		}
-		access.MountPush(active.Mux(), sender)
 		senders := []pushSender{sender}
 		// A disabled APNs lane holds no delivery grants: purging on boot keeps
 		// `apns off` from resurrecting old registrations when re-enabled.
@@ -114,7 +113,6 @@ func buildServer(ctx context.Context, policy trust.TrustPolicy, roles daemon.Rol
 			if err != nil {
 				return err
 			}
-			access.MountAPNS(active.Mux(), apns, token)
 			senders = append(senders, apns)
 		} else if err := access.PurgeDeviceTokens(bootCtx, active.DB(), active.Append); err != nil {
 			return err
@@ -128,6 +126,12 @@ func buildServer(ctx context.Context, policy trust.TrustPolicy, roles daemon.Rol
 	s, err := daemon.New(cfg)
 	if err != nil {
 		return nil, err
+	}
+	access.RegisterPush(s, vapid)
+	access.MountPush(s)
+	if apnsCfg.Enabled() {
+		access.RegisterAPNS(s, token)
+		access.MountAPNS(s, token)
 	}
 	interaction.MountREST(s)
 	s.Register(mesh.OpPresence, mesh.PresenceHandler)

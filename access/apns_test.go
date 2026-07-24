@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/yasyf/cc-interact/daemon"
 	"github.com/yasyf/cc-interact/event"
 	"github.com/yasyf/cc-interact/store"
 )
@@ -71,13 +72,14 @@ func (f *fakeAPNSClient) recorded() []recordedAPNSPush {
 }
 
 type apnsFixture struct {
-	t      *testing.T
-	store  *store.Store
-	sender *APNSSender
-	client *fakeAPNSClient
-	mux    *http.ServeMux
-	pubKey any
-	now    time.Time
+	t        *testing.T
+	store    *store.Store
+	sender   *APNSSender
+	client   *fakeAPNSClient
+	mux      *http.ServeMux
+	pubKey   any
+	now      time.Time
+	dispatch daemonDispatch
 }
 
 func newAPNSFixture(t *testing.T) *apnsFixture {
@@ -104,8 +106,14 @@ func newAPNSFixture(t *testing.T) *apnsFixture {
 		client: client,
 		now:    func() time.Time { return f.now },
 	}
+	handlers := &apnsHandlers{now: func() time.Time { return f.now }, token: apnsTestBearer}
+	f.dispatch = func(ctx context.Context, env daemon.Envelope) daemon.Reply {
+		return handlers.handleRegister(daemon.HandlerCtx{
+			Ctx: ctx, Env: env, DB: st.DB(), Append: st.AppendEvent,
+		})
+	}
 	f.mux = http.NewServeMux()
-	MountAPNS(f.mux, f.sender, apnsTestBearer)
+	mountAPNS(f.mux, f.dispatch, apnsTestBearer)
 	return f
 }
 
@@ -218,7 +226,7 @@ func TestRegisterDeviceTokenRequiresThePairBearer(t *testing.T) {
 		t.Run(tc.id, func(t *testing.T) {
 			f := newAPNSFixture(t)
 			mux := http.NewServeMux()
-			MountAPNS(mux, f.sender, tc.mount)
+			mountAPNS(mux, f.dispatch, tc.mount)
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequest("POST", "/api/push/device-tokens", strings.NewReader(body))
 			if tc.header != "" {

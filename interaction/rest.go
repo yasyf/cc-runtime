@@ -18,11 +18,8 @@ type sessionsReply struct {
 	Subjects []ListedSubject `json:"subjects"`
 }
 
-// restServer holds the REST plane's shared state: the projection connection
-// and the Append chokepoint the answer route writes through.
 type restServer struct {
 	server *daemon.Server
-	append daemon.AppendFunc
 }
 
 // MountREST mounts the interaction ops' HTTP surface — sessions (the list op
@@ -30,7 +27,7 @@ type restServer struct {
 // wraps whole in its auth handler, so the loopback bypass and bearer-token
 // semantics apply to every route unchanged.
 func MountREST(s *daemon.Server) {
-	rs := &restServer{server: s, append: s.Append}
+	rs := &restServer{server: s}
 	mux := s.Mux()
 	mux.HandleFunc("GET /api/sessions", rs.handleSessions)
 	mux.HandleFunc("GET /api/subjects/{id}/pending", rs.handlePending)
@@ -40,33 +37,43 @@ func MountREST(s *daemon.Server) {
 // handleSessions lists every active subject with its open-question count, so a
 // web client — which holds no scope — can pick one to open.
 func (rs *restServer) handleSessions(w http.ResponseWriter, r *http.Request) {
-	subjects, err := listSessions(r.Context(), rs.server.DB())
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	reply := rs.server.Dispatch(r.Context(), daemon.Envelope{Op: OpSessions})
+	if !reply.OK {
+		http.Error(w, reply.Error, http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, sessionsReply{Subjects: subjects})
+	var listed listReply
+	if err := json.Unmarshal(reply.Body, &listed); err != nil {
+		http.Error(w, "decode sessions reply: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, sessionsReply{Subjects: listed.Subjects})
 }
 
 // handlePending lists a subject's open questions with their full payloads,
 // 404ing an unknown subject rather than answering it with an empty set.
 func (rs *restServer) handlePending(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	known, err := subjectExists(r.Context(), rs.server.DB(), id)
+	body, err := json.Marshal(subjectBody{SubjectID: id})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "encode pending request: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if !known {
+	reply := rs.server.Dispatch(r.Context(), daemon.Envelope{Op: OpPending, Body: body})
+	if !reply.OK {
+		http.Error(w, reply.Error, http.StatusInternalServerError)
+		return
+	}
+	var pending pendingReply
+	if err := json.Unmarshal(reply.Body, &pending); err != nil {
+		http.Error(w, "decode pending reply: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if pending.Missing {
 		http.Error(w, "unknown subject: "+id, http.StatusNotFound)
 		return
 	}
-	questions, err := openQuestions(r.Context(), rs.server.DB(), id)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, pendingReply{Questions: questions})
+	writeJSON(w, pendingReply{Questions: pending.Questions})
 }
 
 // RequireJSON rejects a request whose Content-Type is not application/json
@@ -110,17 +117,28 @@ func (rs *restServer) handleAnswer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.SubjectID = id
-	idled, err := applyAnswer(r.Context(), rs.server.DB(), rs.append, a)
-	var unknown unknownQuestionError
-	switch {
-	case errors.As(err, &unknown):
-		http.Error(w, err.Error(), http.StatusNotFound)
-		return
-	case err != nil:
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	body, err := json.Marshal(a)
+	if err != nil {
+		http.Error(w, "encode answer request: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, answerReply{Idled: idled})
+	reply := rs.server.Dispatch(r.Context(), daemon.Envelope{Op: OpAnswer, Body: body})
+	var answer answerReply
+	if len(reply.Body) > 0 {
+		if err := json.Unmarshal(reply.Body, &answer); err != nil {
+			http.Error(w, "decode answer reply: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	if !reply.OK {
+		if answer.Missing {
+			http.Error(w, reply.Error, http.StatusNotFound)
+			return
+		}
+		http.Error(w, reply.Error, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, answerReply{Idled: answer.Idled})
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 
@@ -31,7 +32,8 @@ type pollReply struct {
 }
 
 type answerReply struct {
-	Idled bool `json:"idled"`
+	Idled   bool `json:"idled"`
+	Missing bool `json:"missing,omitempty"`
 }
 
 type subjectBody struct {
@@ -40,6 +42,7 @@ type subjectBody struct {
 
 type pendingReply struct {
 	Questions []PendingQuestion `json:"questions"`
+	Missing   bool              `json:"missing,omitempty"`
 }
 
 type listBody struct {
@@ -74,6 +77,7 @@ func Register(s *daemon.Server, fanout Fanout) {
 	s.Register(OpAnswerPoll, handleAnswerPoll)
 	s.Register(OpPending, handlePending)
 	s.Register(OpList, handleList)
+	s.Register(OpSessions, handleSessions)
 	s.Register(OpCaptureNotification, h.handleCaptureNotification)
 	s.Register(OpCaptureQuestion, h.handleCaptureQuestion)
 }
@@ -223,6 +227,11 @@ func handleAnswer(hc daemon.HandlerCtx) daemon.Reply {
 	}
 	idled, err := applyAnswer(hc.Ctx, hc.DB, hc.Append, a)
 	if err != nil {
+		var unknown unknownQuestionError
+		if errors.As(err, &unknown) {
+			body, _ := json.Marshal(answerReply{Missing: true})
+			return daemon.Reply{OK: false, Error: err.Error(), Body: body}
+		}
 		return daemon.Reply{OK: false, Error: err.Error()}
 	}
 	body, _ := json.Marshal(answerReply{Idled: idled})
@@ -308,12 +317,29 @@ func handlePending(hc daemon.HandlerCtx) daemon.Reply {
 	if err := json.Unmarshal(hc.Env.Body, &b); err != nil {
 		return daemon.Reply{OK: false, Error: "bad pending body: " + err.Error()}
 	}
+	known, err := subjectExists(hc.Ctx, hc.DB, b.SubjectID)
+	if err != nil {
+		return daemon.Reply{OK: false, Error: err.Error()}
+	}
+	if !known {
+		body, _ := json.Marshal(pendingReply{Questions: []PendingQuestion{}, Missing: true})
+		return daemon.Reply{OK: true, Body: body}
+	}
 	questions, err := openQuestions(hc.Ctx, hc.DB, b.SubjectID)
 	if err != nil {
 		return daemon.Reply{OK: false, Error: err.Error()}
 	}
 	body, _ := json.Marshal(pendingReply{Questions: questions})
 	return daemon.Reply{OK: true, Body: body}
+}
+
+func handleSessions(hc daemon.HandlerCtx) daemon.Reply {
+	subjects, err := listSessions(hc.Ctx, hc.DB)
+	if err != nil {
+		return daemon.Reply{OK: false, Error: err.Error()}
+	}
+	body, _ := json.Marshal(listReply{Subjects: subjects, HTTPPort: hc.HTTPPort})
+	return daemon.Reply{OK: true, HTTPPort: hc.HTTPPort, Body: body}
 }
 
 func handleList(hc daemon.HandlerCtx) daemon.Reply {

@@ -47,6 +47,7 @@ const (
 	OpAnswerPoll          daemon.Op = "interaction.answer-poll"
 	OpPending             daemon.Op = "interaction.pending"
 	OpList                daemon.Op = "interaction.list"
+	OpSessions            daemon.Op = "interaction.sessions"
 	OpCaptureNotification daemon.Op = "interaction.capture-notification"
 	OpCaptureQuestion     daemon.Op = "interaction.capture-question"
 )
