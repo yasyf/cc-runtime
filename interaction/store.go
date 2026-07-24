@@ -96,6 +96,157 @@ func withBusyRetry(ctx context.Context, fn func() error) error {
 	return err
 }
 
+const (
+	notificationPending    = "pending"
+	notificationDelivering = "delivering"
+	notificationCompleted  = "completed"
+)
+
+type notificationDelivery struct {
+	subjectID   string
+	deliveryKey string
+	eventSeq    int64
+	payload     string
+}
+
+// claimNotificationDelivery durably enqueues a keyed notification and claims
+// its pending delivery. A process crash leaves either pending or delivering;
+// boot replay resets the latter before claiming it again.
+func claimNotificationDelivery(ctx context.Context, db *sql.DB, subjectID, deliveryKey string, eventSeq int64, payload json.RawMessage) (bool, error) {
+	if deliveryKey == "" {
+		return true, nil
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("begin notification delivery claim: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var stored string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT payload FROM events WHERE subject_id = ? AND seq = ?`, subjectID, eventSeq,
+	).Scan(&stored); err != nil {
+		return false, fmt.Errorf("read notification delivery event: %w", err)
+	}
+	if stored != string(payload) {
+		return false, errors.New("notification delivery key reused with different payload")
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO notification_deliveries(subject_id, delivery_key, event_seq, payload, state)
+VALUES(?, ?, ?, ?, ?)
+ON CONFLICT(subject_id, delivery_key) DO NOTHING`, subjectID, deliveryKey, eventSeq, payload, notificationPending); err != nil {
+		return false, fmt.Errorf("enqueue notification delivery: %w", err)
+	}
+	var existingSeq int64
+	var existingPayload string
+	if err := tx.QueryRowContext(ctx, `
+SELECT event_seq, payload FROM notification_deliveries
+WHERE subject_id = ? AND delivery_key = ?`, subjectID, deliveryKey).Scan(&existingSeq, &existingPayload); err != nil {
+		return false, fmt.Errorf("read notification delivery: %w", err)
+	}
+	if existingSeq != eventSeq || existingPayload != string(payload) {
+		return false, errors.New("notification delivery key reused with different payload")
+	}
+	result, err := tx.ExecContext(ctx, `
+UPDATE notification_deliveries SET state = ?
+WHERE subject_id = ? AND delivery_key = ? AND state = ?`,
+		notificationDelivering, subjectID, deliveryKey, notificationPending)
+	if err != nil {
+		return false, fmt.Errorf("claim notification delivery: %w", err)
+	}
+	claimed, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("read notification delivery claim: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit notification delivery claim: %w", err)
+	}
+	return claimed == 1, nil
+}
+
+func finishNotificationDelivery(ctx context.Context, db *sql.DB, subjectID, deliveryKey string, delivered bool) error {
+	if deliveryKey == "" {
+		return nil
+	}
+	next := notificationPending
+	if delivered {
+		next = notificationCompleted
+	}
+	_, err := db.ExecContext(ctx, `
+UPDATE notification_deliveries SET state = ?
+WHERE subject_id = ? AND delivery_key = ? AND state = ?`,
+		next, subjectID, deliveryKey, notificationDelivering)
+	if err != nil {
+		return fmt.Errorf("finish notification delivery: %w", err)
+	}
+	return nil
+}
+
+func notificationDeliveryCompletion(db *sql.DB, subjectID, deliveryKey string) func(error) {
+	if deliveryKey == "" {
+		return nil
+	}
+	return func(deliveryErr error) {
+		ctx, cancel := cleanupCtx()
+		defer cancel()
+		_ = finishNotificationDelivery(ctx, db, subjectID, deliveryKey, deliveryErr == nil)
+	}
+}
+
+// ReplayNotificationDeliveries resets interrupted claims and replays every
+// durable pending keyed notification. It runs during boot after delivery lanes
+// are installed and before Ready is published.
+func ReplayNotificationDeliveries(ctx context.Context, db *sql.DB, fanout Fanout) error {
+	if _, err := db.ExecContext(ctx, `UPDATE notification_deliveries SET state = ? WHERE state = ?`, notificationPending, notificationDelivering); err != nil {
+		return fmt.Errorf("reset interrupted notification deliveries: %w", err)
+	}
+	rows, err := db.QueryContext(ctx, `
+SELECT subject_id, delivery_key, event_seq, payload
+FROM notification_deliveries WHERE state = ?
+ORDER BY subject_id, event_seq`, notificationPending)
+	if err != nil {
+		return fmt.Errorf("list pending notification deliveries: %w", err)
+	}
+	var pending []notificationDelivery
+	for rows.Next() {
+		var delivery notificationDelivery
+		if err := rows.Scan(&delivery.subjectID, &delivery.deliveryKey, &delivery.eventSeq, &delivery.payload); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan pending notification delivery: %w", err)
+		}
+		pending = append(pending, delivery)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close pending notification deliveries: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate pending notification deliveries: %w", err)
+	}
+	for _, delivery := range pending {
+		result, err := db.ExecContext(ctx, `
+UPDATE notification_deliveries SET state = ?
+WHERE subject_id = ? AND delivery_key = ? AND state = ?`,
+			notificationDelivering, delivery.subjectID, delivery.deliveryKey, notificationPending)
+		if err != nil {
+			return fmt.Errorf("claim replayed notification delivery: %w", err)
+		}
+		claimed, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("read replayed notification claim: %w", err)
+		}
+		if claimed != 1 {
+			continue
+		}
+		var notification NotificationPayload
+		if err := json.Unmarshal([]byte(delivery.payload), &notification); err != nil {
+			return fmt.Errorf("decode pending notification delivery: %w", err)
+		}
+		fanout.Notification(delivery.subjectID, delivery.eventSeq, notification,
+			notificationDeliveryCompletion(db, delivery.subjectID, delivery.deliveryKey))
+	}
+	return nil
+}
+
 // insertPendingAndAwait projects a freshly-published question AND engages the
 // gate in ONE transaction: INSERT the open row, then UPDATE the subject to
 // awaiting. Atomicity is the gate invariant — a concurrent handleAnswer's

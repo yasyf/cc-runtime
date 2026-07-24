@@ -34,13 +34,6 @@ func TestExecRunnerLocalPreservesOutputAndTypedFailure(t *testing.T) {
 	}
 }
 
-func TestExecRunnerSSHOnceRejectsImplicitTarget(t *testing.T) {
-	pool := testWorkerPool(t)
-	if _, err := NewExecRunner(pool).SSHOnce(context.Background(), "peer", "true", nil); err == nil {
-		t.Fatal("SSHOnce accepted target without explicit user")
-	}
-}
-
 func testWorkerPool(t *testing.T) *worker.Pool {
 	t.Helper()
 	pool, err := worker.NewPool(worker.Config{

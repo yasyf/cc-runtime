@@ -228,18 +228,6 @@ func AnswerRemote(ctx context.Context, r Runner, target string, a interaction.An
 // error even on a nonzero exit, since the passthrough exits nonzero on an
 // OK=false reply the caller reads via reply.OK.
 func meshRPC(ctx context.Context, t fanTarget, op daemon.Op, session string, params any) (daemon.Reply, string, error) {
-	return runRPC(ctx, t, op, session, params, false)
-}
-
-// meshRPCOnce is meshRPC over a single dial attempt, for the non-idempotent
-// notify op: the failover dial re-runs the remote command at-least-once, which
-// would duplicate an append the peer already recorded. Answers ride the
-// failover leg instead — the daemon dedupes repeated answers per question.
-func meshRPCOnce(ctx context.Context, t fanTarget, op daemon.Op, session string, params any) (daemon.Reply, string, error) {
-	return runRPC(ctx, t, op, session, params, true)
-}
-
-func runRPC(ctx context.Context, t fanTarget, op daemon.Op, session string, params any, once bool) (daemon.Reply, string, error) {
 	b, err := json.Marshal(params)
 	if err != nil {
 		return daemon.Reply{}, "", err
@@ -253,8 +241,6 @@ func runRPC(ctx context.Context, t fanTarget, op daemon.Op, session string, para
 			args = append(args, "--session", session)
 		}
 		stdout, runErr = t.runner.Local(ctx, b, Binary, append(args, "--json", "-")...)
-	case once:
-		stdout, runErr = t.runner.SSHOnce(ctx, t.host, rpcRemoteCmd(op, session), b)
 	default:
 		stdout, runErr = t.runner.SSH(ctx, t.host, rpcRemoteCmd(op, session), b)
 	}

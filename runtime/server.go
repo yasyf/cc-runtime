@@ -9,7 +9,7 @@ import (
 	"github.com/yasyf/cc-interact/daemon"
 	"github.com/yasyf/cc-interact/sse"
 	"github.com/yasyf/cc-interact/store"
-	"github.com/yasyf/daemonkit/daemonrole"
+	"github.com/yasyf/daemonkit/trust"
 	"github.com/yasyf/synckit/meshtrust"
 
 	"github.com/yasyf/cc-runtime/access"
@@ -28,7 +28,7 @@ const daemonMeshProcessLimit = 64
 // tokenless mesh trust when the shared synckit mesh state exists, and the
 // push lanes — Web Push always, direct APNs when configured — feeding every
 // question/notification append.
-func buildServer(ctx context.Context, role daemonrole.Classifier, processes *processowner.Owner) (*daemon.Server, error) {
+func buildServer(ctx context.Context, policy trust.TrustPolicy, roles daemon.Roles, processes *processowner.Owner) (*daemon.Server, error) {
 	if err := mesh.Initialize(ctx); err != nil {
 		return nil, err
 	}
@@ -56,7 +56,8 @@ func buildServer(ctx context.Context, role daemonrole.Classifier, processes *pro
 		Paths:             interaction.AppPaths(),
 		WireBuild:         daemon.WireBuild,
 		RuntimeBuild:      version.Version,
-		DaemonRole:        role,
+		TrustPolicy:       policy,
+		Roles:             roles,
 		ActiveStatuses:    interaction.ActiveStatuses,
 		Gate:              interaction.Gate(),
 		GateErrorReason:   interaction.GateErrorReason,
@@ -119,6 +120,9 @@ func buildServer(ctx context.Context, role daemonrole.Classifier, processes *pro
 			return err
 		}
 		fanout.setSenders(senders)
+		if err := interaction.ReplayNotificationDeliveries(bootCtx, active.DB(), fanout); err != nil {
+			return err
+		}
 		return conn.BootReconcile(bootCtx, active)
 	}
 	s, err := daemon.New(cfg)
@@ -133,7 +137,7 @@ func buildServer(ctx context.Context, role daemonrole.Classifier, processes *pro
 }
 
 func serve(ctx context.Context) (err error) {
-	role, err := daemonRole()
+	policy, err := daemonTrustPolicy()
 	if err != nil {
 		return err
 	}
@@ -142,7 +146,7 @@ func serve(ctx context.Context) (err error) {
 		return err
 	}
 	defer func() { err = errors.Join(err, processes.Close(ctx)) }()
-	s, err := buildServer(ctx, role, processes)
+	s, err := buildServer(ctx, policy, daemonRoles(), processes)
 	if err != nil {
 		return err
 	}

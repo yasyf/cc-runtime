@@ -10,7 +10,7 @@ import (
 // MockRunner is a scripted Runner for tests, mirroring synckit's
 // hostregistry.MockRunner but recording each call's stdin, since the rpc
 // fan-out feeds params over stdin. Local replies key on the joined "name args";
-// SSH/SSHOnce replies key on a remote-command substring. Exported so the tui
+// SSH replies key on a remote-command substring. Exported so the tui
 // tests drive the same boundary.
 type MockRunner struct {
 	mu        sync.Mutex
@@ -23,7 +23,7 @@ type MockRunner struct {
 
 // MockCall is one recorded invocation against a MockRunner.
 type MockCall struct {
-	Kind   string // "local", "ssh", or "ssh-once"
+	Kind   string // "local" or "ssh"
 	Target string // ssh target, or "" for local
 	Cmd    string // ssh remote command, or "name arg arg" for local
 	Stdin  string
@@ -50,14 +50,14 @@ func (m *MockRunner) OnLocal(key, out string, err error) *MockRunner {
 	return m
 }
 
-// OnSSH scripts the reply for any SSH or SSHOnce call whose remote command
+// OnSSH scripts the reply for any SSH call whose remote command
 // contains the given substring; rules match in registration order.
 func (m *MockRunner) OnSSH(contains, out string, err error) *MockRunner {
 	m.sshOn = append(m.sshOn, sshRule{contains: contains, reply: mockReply{out: out, err: err}})
 	return m
 }
 
-// DefaultSSH sets the reply for an SSH or SSHOnce call matching no OnSSH rule.
+// DefaultSSH sets the reply for an SSH call matching no OnSSH rule.
 func (m *MockRunner) DefaultSSH(out string, err error) *MockRunner {
 	m.sshDef = mockReply{out: out, err: err}
 	m.hasSSHDef = true
@@ -78,10 +78,6 @@ func (m *MockRunner) Local(_ context.Context, stdin []byte, name string, args ..
 
 func (m *MockRunner) SSH(ctx context.Context, target, remoteCmd string, stdin []byte) (string, error) {
 	return m.ssh(ctx, "ssh", target, remoteCmd, stdin)
-}
-
-func (m *MockRunner) SSHOnce(ctx context.Context, target, remoteCmd string, stdin []byte) (string, error) {
-	return m.ssh(ctx, "ssh-once", target, remoteCmd, stdin)
 }
 
 func (m *MockRunner) ssh(_ context.Context, kind, target, remoteCmd string, stdin []byte) (string, error) {

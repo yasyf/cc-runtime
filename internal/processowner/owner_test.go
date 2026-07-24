@@ -79,6 +79,27 @@ func TestOwnerCloseSettlesBeforeExplicitRecovery(t *testing.T) {
 	}
 }
 
+func TestOwnerCloseBoundsLifecycleAcquisition(t *testing.T) {
+	owner, err := New(t.TempDir(), "workers.db", 1)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := owner.acquire(t.Context()); err != nil {
+		t.Fatalf("acquire lifecycle: %v", err)
+	}
+	previous := settlementTimeout
+	settlementTimeout = 20 * time.Millisecond
+	defer func() { settlementTimeout = previous }()
+	if err := owner.Close(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Close while lifecycle held = %v, want deadline exceeded", err)
+	}
+	settlementTimeout = previous
+	owner.release()
+	if err := owner.Close(context.Background()); err != nil {
+		t.Fatalf("Close after lifecycle release: %v", err)
+	}
+}
+
 func TestOwnerOpensAdmissionOnlyAfterRecovery(t *testing.T) {
 	owner, err := New(t.TempDir(), "workers.db", 1)
 	if err != nil {

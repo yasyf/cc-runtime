@@ -16,4 +16,13 @@ CREATE TABLE pending_questions (
   PRIMARY KEY (subject_id, question_id)
 );
 CREATE INDEX idx_pending_questions_open ON pending_questions(subject_id, answered);
+CREATE TABLE notification_deliveries (
+  subject_id   TEXT NOT NULL REFERENCES subjects(id),
+  delivery_key TEXT NOT NULL,
+  event_seq    INTEGER NOT NULL,
+  payload      TEXT NOT NULL,
+  state        TEXT NOT NULL CHECK (state IN ('pending', 'delivering', 'completed')),
+  PRIMARY KEY (subject_id, delivery_key),
+  UNIQUE (subject_id, event_seq)
+);
 `}

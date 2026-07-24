@@ -27,7 +27,6 @@ func Root() *cobra.Command {
 	root.AddCommand(
 		versionCmd(),
 		cmd.DaemonCmd(d),
-		cmd.DaemonStopControlCmd(d),
 		cmd.WatchCmd(d),
 		cmd.StatusCmd(d),
 		cmd.StopCmd(d),

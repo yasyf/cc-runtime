@@ -12,7 +12,8 @@ import (
 	"github.com/yasyf/cc-interact/store"
 	"github.com/yasyf/cc-interact/subject"
 	dkdaemon "github.com/yasyf/daemonkit/daemon"
-	"github.com/yasyf/daemonkit/daemonrole"
+	"github.com/yasyf/daemonkit/service"
+	"github.com/yasyf/daemonkit/trust"
 	"github.com/yasyf/daemonkit/wire"
 
 	"github.com/yasyf/cc-runtime/access"
@@ -50,26 +51,41 @@ func shortTempHome(t *testing.T) string {
 	return filepath.Clean(dir)
 }
 
-func testDaemonRole(t *testing.T) daemonrole.Classifier {
+func testDaemonAgent(t *testing.T) service.Agent {
 	t.Helper()
-	executable, err := os.Executable()
+	executable, err := service.CanonicalExecutable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	return daemonrole.Classifier{RoleID: "com.yasyf.cc-runtime.test", RolePath: filepath.Clean(executable)}
+	return service.Agent{
+		Label: "com.yasyf.cc-runtime.test", Program: executable, Args: []string{"daemon"},
+		LogPath: interaction.AppPaths().LogPath(), RestartPolicy: service.RestartOnFailure,
+	}
 }
 
-func installTestRoleAlias(t *testing.T) {
+func testDaemonRoles() daemon.Roles {
+	return daemon.Roles{
+		Business: trust.UnprotectedRole, Lifecycle: "com.yasyf.cc-runtime.test.lifecycle.v1",
+		StopControl: "com.yasyf.cc-runtime.test.stop.v1",
+	}
+}
+
+func testDaemonTrustPolicy(t *testing.T) trust.TrustPolicy {
 	t.Helper()
-	executable, err := os.Executable()
+	roles := testDaemonRoles()
+	policy, err := trust.NewTrustPolicy(trust.TrustPolicyConfig{
+		ExpectedUID: os.Geteuid(), AllowUnprotected: true,
+		Roles: map[trust.PeerRole]trust.Requirement{
+			roles.Lifecycle:   {TeamID: "TESTTEAM", SigningIdentifier: "com.yasyf.cc-runtime.test.lifecycle"},
+			roles.StopControl: {TeamID: "TESTTEAM", SigningIdentifier: "com.yasyf.cc-runtime.test.stop"},
+		},
+		StopRoles: []trust.PeerRole{roles.StopControl}, ReceiptRoles: []trust.PeerRole{roles.Lifecycle},
+		ReadinessRoles: []trust.PeerRole{roles.Lifecycle},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir := t.TempDir()
-	if err := os.Symlink(executable, filepath.Join(dir, "cc-runtime")); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return policy
 }
 
 func waitE2EClient(t *testing.T, launcher daemon.Launcher) *daemon.Client {
@@ -106,11 +122,9 @@ func waitE2EClient(t *testing.T, launcher daemon.Launcher) *daemon.Client {
 func newE2E(t *testing.T) *e2e {
 	t.Helper()
 	t.Setenv("HOME", shortTempHome(t))
-	installTestRoleAlias(t)
-	role := testDaemonRole(t)
 	testLauncher := daemon.Launcher{
 		Paths: interaction.AppPaths(), WireBuild: daemon.WireBuild, RuntimeBuild: version.Version,
-		Args: []string{"daemon"}, StopArgs: []string{daemon.StopControlCommand}, DaemonRole: role,
+		Agent: testDaemonAgent(t), Roles: testDaemonRoles(),
 	}
 	accessState := access.Store{Dir: interaction.AppPaths().StateDir()}
 	if err := accessState.WriteConfig(access.Config{Bind: access.BindLoopback}); err != nil {
@@ -129,7 +143,7 @@ func newE2E(t *testing.T) *e2e {
 			t.Errorf("close process owner: %v", err)
 		}
 	})
-	s, err := buildServer(t.Context(), role, processes)
+	s, err := buildServer(t.Context(), testDaemonTrustPolicy(t), testDaemonRoles(), processes)
 	if err != nil {
 		t.Fatalf("buildServer: %v", err)
 	}

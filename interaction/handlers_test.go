@@ -12,8 +12,8 @@ import (
 
 	"github.com/yasyf/cc-interact/daemon"
 	dkdaemon "github.com/yasyf/daemonkit/daemon"
-	"github.com/yasyf/daemonkit/daemonrole"
 	"github.com/yasyf/daemonkit/paths"
+	"github.com/yasyf/daemonkit/trust"
 	"github.com/yasyf/daemonkit/wire"
 )
 
@@ -30,13 +30,29 @@ func shortTempHome(t *testing.T) string {
 	return filepath.Clean(dir)
 }
 
-func testDaemonRole(t *testing.T) daemonrole.Classifier {
+func testRoles() daemon.Roles {
+	return daemon.Roles{
+		Business: trust.UnprotectedRole, Lifecycle: "com.yasyf.cc-runtime.test.lifecycle.v1",
+		StopControl: "com.yasyf.cc-runtime.test.stop.v1",
+	}
+}
+
+func testTrustPolicy(t *testing.T) trust.TrustPolicy {
 	t.Helper()
-	executable, err := os.Executable()
+	roles := testRoles()
+	policy, err := trust.NewTrustPolicy(trust.TrustPolicyConfig{
+		ExpectedUID: os.Geteuid(), AllowUnprotected: true,
+		Roles: map[trust.PeerRole]trust.Requirement{
+			roles.Lifecycle:   {TeamID: "TESTTEAM", SigningIdentifier: "com.yasyf.cc-runtime.test.lifecycle"},
+			roles.StopControl: {TeamID: "TESTTEAM", SigningIdentifier: "com.yasyf.cc-runtime.test.stop"},
+		},
+		StopRoles: []trust.PeerRole{roles.StopControl}, ReceiptRoles: []trust.PeerRole{roles.Lifecycle},
+		ReadinessRoles: []trust.PeerRole{roles.Lifecycle},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return daemonrole.Classifier{RoleID: "com.yasyf.cc-runtime.test", RolePath: filepath.Clean(executable)}
+	return policy
 }
 
 func waitReadyClient(t *testing.T, p paths.Paths, runtimeBuild string) *daemon.Client {
@@ -50,7 +66,7 @@ func waitReadyClient(t *testing.T, p paths.Paths, runtimeBuild string) *daemon.C
 	for {
 		if client == nil {
 			client, err = daemon.NewClient(context.Background(), daemon.ClientConfig{
-				Socket: p.SocketPath(), WireBuild: daemon.WireBuild,
+				Socket: p.SocketPath(), WireBuild: daemon.WireBuild, Role: trust.UnprotectedRole,
 			})
 		}
 		if err == nil {
@@ -83,28 +99,45 @@ type recordingFanout struct {
 	mu            sync.Mutex
 	questions     []fanoutQuestion
 	notifications []fanoutNotification
+	dropNext      bool
 }
 
 type fanoutQuestion struct {
 	subjectID string
+	eventID   int64
 	q         QuestionPayload
 }
 
 type fanoutNotification struct {
 	subjectID string
+	eventID   int64
 	n         NotificationPayload
 }
 
-func (f *recordingFanout) Question(subjectID string, q QuestionPayload) {
+func (f *recordingFanout) Question(subjectID string, eventID int64, q QuestionPayload) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.questions = append(f.questions, fanoutQuestion{subjectID: subjectID, q: q})
+	f.questions = append(f.questions, fanoutQuestion{subjectID: subjectID, eventID: eventID, q: q})
 }
 
-func (f *recordingFanout) Notification(subjectID string, n NotificationPayload) {
+func (f *recordingFanout) Notification(subjectID string, eventID int64, n NotificationPayload, complete func(error)) {
+	f.mu.Lock()
+	if f.dropNext {
+		f.dropNext = false
+		f.mu.Unlock()
+		return
+	}
+	f.notifications = append(f.notifications, fanoutNotification{subjectID: subjectID, eventID: eventID, n: n})
+	f.mu.Unlock()
+	if complete != nil {
+		complete(nil)
+	}
+}
+
+func (f *recordingFanout) dropNextNotification() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.notifications = append(f.notifications, fanoutNotification{subjectID: subjectID, n: n})
+	f.dropNext = true
 }
 
 func (f *recordingFanout) snapshot() ([]fanoutQuestion, []fanoutNotification) {
@@ -120,6 +153,7 @@ type harness struct {
 	client *daemon.Client
 	paths  paths.Paths
 	fanout *recordingFanout
+	server *daemon.Server
 }
 
 func newHarness(t *testing.T, tweaks ...func(*daemon.Config)) *harness {
@@ -132,7 +166,8 @@ func newHarness(t *testing.T, tweaks ...func(*daemon.Config)) *harness {
 		Paths:           p,
 		WireBuild:       daemon.WireBuild,
 		RuntimeBuild:    "v0.0.0-test",
-		DaemonRole:      testDaemonRole(t),
+		TrustPolicy:     testTrustPolicy(t),
+		Roles:           testRoles(),
 		ActiveStatuses:  ActiveStatuses,
 		Gate:            Gate(),
 		GateErrorReason: GateErrorReason,
@@ -155,14 +190,17 @@ func newHarness(t *testing.T, tweaks ...func(*daemon.Config)) *harness {
 	t.Cleanup(func() {
 		cancel()
 		select {
-		case <-done:
+		case err := <-done:
+			if err != nil {
+				t.Errorf("daemon Serve: %v", err)
+			}
 		case <-time.After(5 * time.Second):
 			t.Error("daemon did not stop within 5s")
 		}
 	})
 
 	client := waitReadyClient(t, p, cfg.RuntimeBuild)
-	return &harness{t: t, client: client, paths: p, fanout: fanout}
+	return &harness{t: t, client: client, paths: p, fanout: fanout, server: s}
 }
 
 func (h *harness) do(env daemon.Envelope) daemon.Reply {
@@ -478,7 +516,7 @@ func TestFanoutFiresOnDurableAppendsOnly(t *testing.T) {
 	if len(questions) != 1 || len(notifications) != 0 {
 		t.Fatalf("after ask: %d questions, %d notifications fanned out, want 1 and 0", len(questions), len(notifications))
 	}
-	if questions[0].subjectID != subjectID || questions[0].q.Header != "deploy?" || questions[0].q.Prompt != "pick one" {
+	if questions[0].subjectID != subjectID || questions[0].eventID != questionID || questions[0].q.Header != "deploy?" || questions[0].q.Prompt != "pick one" {
 		t.Fatalf("fanned-out question = %+v, want subject %s header deploy? prompt pick one", questions[0], subjectID)
 	}
 
@@ -510,6 +548,69 @@ func TestFanoutFiresOnDurableAppendsOnly(t *testing.T) {
 	questions, notifications = h.fanout.snapshot()
 	if len(questions) != 1 || len(notifications) != 2 {
 		t.Fatalf("after answer: %d questions, %d notifications fanned out, want unchanged 1 and 2 (answers never fan out)", len(questions), len(notifications))
+	}
+}
+
+func TestHandleNotifyDeduplicatesStableDeliveryKey(t *testing.T) {
+	h := newHarness(t)
+	n := NotificationPayload{Message: "routed", DeliveryKey: "routed:origin:subject:7"}
+
+	first := h.do(h.agentEnv(OpNotify, n))
+	second := h.do(h.agentEnv(OpNotify, n))
+	if !first.OK || !second.OK {
+		t.Fatalf("notify replies = (%+v, %+v), want both successful", first, second)
+	}
+	_, notifications := h.fanout.snapshot()
+	if len(notifications) != 1 {
+		t.Fatalf("duplicate delivery fanned out %d times, want exactly once", len(notifications))
+	}
+	if notifications[0].n.DeliveryKey != n.DeliveryKey || notifications[0].eventID == 0 {
+		t.Fatalf("fanned-out notification = %+v, want stable key and durable event id", notifications[0])
+	}
+
+	conflict := h.do(h.agentEnv(OpNotify, NotificationPayload{Message: "different", DeliveryKey: n.DeliveryKey}))
+	if conflict.OK || !strings.Contains(conflict.Error, "delivery key reused with different payload") {
+		t.Fatalf("conflicting delivery key reply = %+v, want payload mismatch", conflict)
+	}
+}
+
+func TestNotificationOutboxReplaysCrashBetweenClaimAndFanout(t *testing.T) {
+	h := newHarness(t)
+	h.fanout.dropNextNotification()
+	n := NotificationPayload{Message: "routed", DeliveryKey: "routed:origin:subject:8"}
+
+	first := h.do(h.agentEnv(OpNotify, n))
+	if !first.OK {
+		t.Fatalf("notify: %s", first.Error)
+	}
+	_, notifications := h.fanout.snapshot()
+	if len(notifications) != 0 {
+		t.Fatalf("simulated pre-fanout crash delivered %+v", notifications)
+	}
+	if err := ReplayNotificationDeliveries(t.Context(), h.server.DB(), h.fanout); err != nil {
+		t.Fatalf("replay notification deliveries: %v", err)
+	}
+	_, notifications = h.fanout.snapshot()
+	if len(notifications) != 1 || notifications[0].n.DeliveryKey != n.DeliveryKey {
+		t.Fatalf("replayed notifications = %+v, want one stable-key delivery", notifications)
+	}
+	var state string
+	if err := h.server.DB().QueryRow(`
+SELECT state FROM notification_deliveries
+WHERE subject_id = ? AND delivery_key = ?`, first.SubjectID, n.DeliveryKey).Scan(&state); err != nil {
+		t.Fatalf("read delivery state: %v", err)
+	}
+	if state != notificationCompleted {
+		t.Fatalf("delivery state = %q, want completed", state)
+	}
+
+	retry := h.do(h.agentEnv(OpNotify, n))
+	if !retry.OK {
+		t.Fatalf("retry notify: %s", retry.Error)
+	}
+	_, notifications = h.fanout.snapshot()
+	if len(notifications) != 1 {
+		t.Fatalf("completed delivery retried %d times, want no duplicate", len(notifications))
 	}
 }
 

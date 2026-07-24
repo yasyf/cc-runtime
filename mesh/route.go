@@ -24,10 +24,11 @@ func RoutingEnabled(reg *hostregistry.Registry, routeOff bool) bool {
 // look. It carries no bearer token — answering happens against the origin over the
 // mesh answer path — and its urgency is deliberately empty so the receiving peer
 // never treats it as a routable event and bounces it onward.
-func RoutedNotification(originHost, subjectID, header string) interaction.NotificationPayload {
+func RoutedNotification(originHost, subjectID string, eventID int64, header string) interaction.NotificationPayload {
 	node := hostregistry.HostNode(originHost)
 	msg := fmt.Sprintf("[%s] needs you: %s (subject %s on %s)", node, header, subjectID, node)
-	return interaction.NotificationPayload{Message: msg}
+	key := fmt.Sprintf("routed:%s:%s:%d", originHost, subjectID, eventID)
+	return interaction.NotificationPayload{Message: msg, DeliveryKey: key}
 }
 
 // Router surfaces an interaction on an attended peer when this host is unattended.
@@ -80,7 +81,7 @@ func localAttended(ctx context.Context) (bool, error) {
 // effect without a daemon restart. Routing is best-effort — the caller has already
 // fired the push lanes — so an error is returned for logging, never to block
 // delivery.
-func (r Router) Route(ctx context.Context, subjectID, header string) (string, error) {
+func (r Router) Route(ctx context.Context, subjectID string, eventID int64, header string) (string, error) {
 	reg, err := Config.Load()
 	if err != nil {
 		return "", err
@@ -99,7 +100,7 @@ func (r Router) Route(ctx context.Context, subjectID, header string) (string, er
 	if attended {
 		return "", nil
 	}
-	return r.surfaceFirstAttended(ctx, reg, routedSession(reg.Self, subjectID), RoutedNotification(reg.Self, subjectID, header))
+	return r.surfaceFirstAttended(ctx, reg, routedSession(reg.Self, subjectID), RoutedNotification(reg.Self, subjectID, eventID, header))
 }
 
 // routedSession is the window identity a routed surface stamps on the peer:
@@ -179,11 +180,10 @@ func probePeerPresence(ctx context.Context, t fanTarget) (Presence, error) {
 
 // surface delivers note to the peer over `cc-runtime rpc interaction.notify`,
 // stamping session as the peer-side window identity and returning every failure
-// so a surface that does not land is never silently dropped. The notify is not
-// idempotent, so it rides the single-dial leg: a failover retry would re-append
-// a notification the peer already recorded.
+// so a surface that does not land is never silently dropped. The stable
+// delivery key makes the receiving append idempotent across SSH failover.
 func (r Router) surface(ctx context.Context, target, session string, note interaction.NotificationPayload) error {
-	reply, _, err := meshRPCOnce(ctx, fanTarget{host: target, runner: r.Dial(target)}, interaction.OpNotify, session, note)
+	reply, _, err := meshRPC(ctx, fanTarget{host: target, runner: r.Dial(target)}, interaction.OpNotify, session, note)
 	if err != nil {
 		return fmt.Errorf("surface on %s: %w", hostregistry.HostNode(target), err)
 	}

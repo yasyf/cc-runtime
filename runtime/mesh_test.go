@@ -33,10 +33,16 @@ func seedPeer(t *testing.T, target string) {
 	}
 	if _, err := mesh.Config.Update(context.Background(), func(g *hostregistry.Registry) error {
 		g.Self = "me@here.tail.ts.net"
-		g.UpsertHost(target)
 		return nil
 	}); err != nil {
 		t.Fatalf("seed peer: %v", err)
+	}
+	fact, err := hostregistry.NewSSHHostFact(target, "/opt/homebrew/bin/synckitd", nil)
+	if err != nil {
+		t.Fatalf("host fact: %v", err)
+	}
+	if err := mesh.Config.RegisterHost(context.Background(), fact); err != nil {
+		t.Fatalf("register peer: %v", err)
 	}
 }
 

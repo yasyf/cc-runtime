@@ -55,8 +55,8 @@ type listReply struct {
 // SSE plane (Web Push). Handlers invoke it inline after Append succeeds, so
 // implementations return immediately and deliver in the background.
 type Fanout interface {
-	Question(subjectID string, q QuestionPayload)
-	Notification(subjectID string, n NotificationPayload)
+	Question(subjectID string, eventID int64, q QuestionPayload)
+	Notification(subjectID string, eventID int64, n NotificationPayload, complete func(error))
 }
 
 // handlers binds the append-observing ops to the fan-out they feed.
@@ -161,7 +161,7 @@ func (h handlers) handleAsk(hc daemon.HandlerCtx) daemon.Reply {
 		_ = setSubjectStatus(ctx, hc.DB, sub.ID, StatusAwaiting)
 		return daemon.Reply{OK: false, Error: err.Error()}
 	}
-	h.fanout.Question(sub.ID, q)
+	h.fanout.Question(sub.ID, seq, q)
 	body, _ := json.Marshal(askReply{SubjectID: sub.ID, QuestionID: seq})
 	return daemon.Reply{OK: true, SubjectID: sub.ID, Body: body}
 }
@@ -178,13 +178,31 @@ func (h handlers) handleNotify(hc daemon.HandlerCtx) daemon.Reply {
 	if err != nil {
 		return daemon.Reply{OK: false, Error: err.Error()}
 	}
-	if _, err := hc.Append(hc.Ctx, &event.Event{
-		SubjectID: sub.ID, Origin: event.OriginAgent, Type: EventNotification, Payload: wireEvent(EventNotification, n),
-	}); err != nil {
+	payload := wireEvent(EventNotification, n)
+	seq, err := hc.Append(hc.Ctx, &event.Event{
+		SubjectID: sub.ID, Origin: event.OriginAgent, Type: EventNotification, Payload: payload,
+		DedupKey: notificationDedupKey(n.DeliveryKey),
+	})
+	if err != nil {
 		return daemon.Reply{OK: false, Error: err.Error()}
 	}
-	h.fanout.Notification(sub.ID, n)
+	ctx, cancel := cleanupCtx()
+	defer cancel()
+	claimed, err := claimNotificationDelivery(ctx, hc.DB, sub.ID, n.DeliveryKey, seq, payload)
+	if err != nil {
+		return daemon.Reply{OK: false, Error: err.Error()}
+	}
+	if claimed {
+		h.fanout.Notification(sub.ID, seq, n, notificationDeliveryCompletion(hc.DB, sub.ID, n.DeliveryKey))
+	}
 	return daemon.Reply{OK: true, SubjectID: sub.ID, Body: json.RawMessage(`{"ok":true}`)}
+}
+
+func notificationDedupKey(deliveryKey string) string {
+	if deliveryKey == "" {
+		return ""
+	}
+	return "notification:" + deliveryKey
 }
 
 // unknownQuestionError marks an answer targeting no projected question, so the
@@ -329,12 +347,13 @@ func (h handlers) handleCaptureNotification(hc daemon.HandlerCtx) daemon.Reply {
 	if !ok {
 		return daemon.Reply{OK: true, Body: json.RawMessage(`{"ok":true}`)}
 	}
-	if _, err := hc.Append(hc.Ctx, &event.Event{
+	seq, err := hc.Append(hc.Ctx, &event.Event{
 		SubjectID: sub.ID, Origin: event.OriginSystem, Type: EventNotification, Payload: wireEvent(EventNotification, n),
-	}); err != nil {
+	})
+	if err != nil {
 		return daemon.Reply{OK: false, Error: err.Error()}
 	}
-	h.fanout.Notification(sub.ID, n)
+	h.fanout.Notification(sub.ID, seq, n, nil)
 	return daemon.Reply{OK: true, SubjectID: sub.ID, Body: json.RawMessage(`{"ok":true}`)}
 }
 
@@ -364,12 +383,13 @@ func (h handlers) handleCaptureQuestion(hc daemon.HandlerCtx) daemon.Reply {
 		return daemon.Reply{OK: true, Body: json.RawMessage(`{"ok":true}`)}
 	}
 	n := NotificationPayload{Message: captureQuestionMessage(q)}
-	if _, err := hc.Append(hc.Ctx, &event.Event{
+	seq, err := hc.Append(hc.Ctx, &event.Event{
 		SubjectID: sub.ID, Origin: event.OriginSystem, Type: EventNotification, Payload: wireEvent(EventNotification, n),
-	}); err != nil {
+	})
+	if err != nil {
 		return daemon.Reply{OK: false, Error: err.Error()}
 	}
-	h.fanout.Notification(sub.ID, n)
+	h.fanout.Notification(sub.ID, seq, n, nil)
 	return daemon.Reply{OK: true, SubjectID: sub.ID, Body: json.RawMessage(`{"ok":true}`)}
 }
 

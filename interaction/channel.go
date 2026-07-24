@@ -10,6 +10,7 @@ import (
 
 	"github.com/yasyf/cc-interact/channel"
 	"github.com/yasyf/cc-interact/daemon"
+	"github.com/yasyf/daemonkit/trust"
 )
 
 // notifyMethod is the JSON-RPC method each subject event is pushed under on the
@@ -178,7 +179,7 @@ func ChannelTools(_ context.Context, session, scope string, pid int) ([]channel.
 		InputSchema: askToolSchema(),
 		Handler: func(ctx context.Context, args json.RawMessage, _ func(string)) (string, bool) {
 			client, err := daemon.NewClient(ctx, daemon.ClientConfig{
-				Socket: AppPaths().SocketPath(), WireBuild: daemon.WireBuild,
+				Socket: AppPaths().SocketPath(), WireBuild: daemon.WireBuild, Role: trust.UnprotectedRole,
 			})
 			if err != nil {
 				return "ask failed: " + err.Error(), true
@@ -214,7 +215,7 @@ func ChannelTools(_ context.Context, session, scope string, pid int) ([]channel.
 		InputSchema: notifyToolSchema(),
 		Handler: func(ctx context.Context, args json.RawMessage, _ func(string)) (string, bool) {
 			client, err := daemon.NewClient(ctx, daemon.ClientConfig{
-				Socket: AppPaths().SocketPath(), WireBuild: daemon.WireBuild,
+				Socket: AppPaths().SocketPath(), WireBuild: daemon.WireBuild, Role: trust.UnprotectedRole,
 			})
 			if err != nil {
 				return "notify failed: " + err.Error(), true

@@ -34,6 +34,7 @@ func (r *recordingSender) recorded() []access.PushPayload {
 // routeCall is one interaction the router was asked to surface on a peer.
 type routeCall struct {
 	subjectID string
+	eventID   int64
 	header    string
 }
 
@@ -45,10 +46,10 @@ type recordingRouter struct {
 	err    error
 }
 
-func (r *recordingRouter) Route(_ context.Context, subjectID, header string) (string, error) {
+func (r *recordingRouter) Route(_ context.Context, subjectID string, eventID int64, header string) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.calls = append(r.calls, routeCall{subjectID, header})
+	r.calls = append(r.calls, routeCall{subjectID, eventID, header})
 	return r.target, r.err
 }
 
@@ -79,8 +80,8 @@ func TestPushFanoutMapsAppendsOntoEveryLane(t *testing.T) {
 		background: func(fn func(context.Context)) { fn(context.Background()) },
 	}
 
-	f.Question("s1", interaction.QuestionPayload{Header: "Deploy?", Prompt: "pick one"})
-	f.Notification("s1", interaction.NotificationPayload{Message: "done", Urgency: "normal"})
+	f.Question("s1", 1, interaction.QuestionPayload{Header: "Deploy?", Prompt: "pick one"})
+	f.Notification("s1", 2, interaction.NotificationPayload{Message: "done", Urgency: "normal"}, nil)
 
 	want := []access.PushPayload{
 		{Type: interaction.EventQuestion, Subject: "s1", Title: "Deploy?", Body: "pick one", Urgency: access.PushUrgencyHigh},
@@ -111,14 +112,14 @@ func TestPushFanoutRoutesQuestionsAndHighNotifications(t *testing.T) {
 		router:     router,
 	}
 
-	f.Question("s1", interaction.QuestionPayload{Header: "Deploy?", Prompt: "pick one"})
-	f.Notification("s2", interaction.NotificationPayload{Message: "urgent", Urgency: access.PushUrgencyHigh})
-	f.Notification("s3", interaction.NotificationPayload{Message: "fyi", Urgency: "normal"})
+	f.Question("s1", 11, interaction.QuestionPayload{Header: "Deploy?", Prompt: "pick one"})
+	f.Notification("s2", 12, interaction.NotificationPayload{Message: "urgent", Urgency: access.PushUrgencyHigh}, nil)
+	f.Notification("s3", 13, interaction.NotificationPayload{Message: "fyi", Urgency: "normal"}, nil)
 
 	if got := len(web.recorded()); got != 3 {
 		t.Fatalf("push lane fired %d times, want 3 (every event pushes regardless of routing)", got)
 	}
-	want := []routeCall{{"s1", "Deploy?"}, {"s2", "urgent"}}
+	want := []routeCall{{"s1", 11, "Deploy?"}, {"s2", 12, "urgent"}}
 	got := router.recorded()
 	if len(got) != len(want) {
 		t.Fatalf("router saw %+v, want %+v (normal notification must not route)", got, want)
@@ -141,7 +142,7 @@ func TestPushFanoutPushesEvenWhenRouteFails(t *testing.T) {
 		router:     router,
 	}
 
-	f.Question("s1", interaction.QuestionPayload{Header: "Deploy?", Prompt: "pick one"})
+	f.Question("s1", 1, interaction.QuestionPayload{Header: "Deploy?", Prompt: "pick one"})
 
 	if got := len(web.recorded()); got != 1 {
 		t.Fatalf("push lane fired %d times, want 1 despite the route failure", got)
@@ -160,8 +161,8 @@ func TestPushFanoutNilRouterSkipsRouting(t *testing.T) {
 		background: func(fn func(context.Context)) { fn(context.Background()) },
 	}
 
-	f.Question("s1", interaction.QuestionPayload{Header: "Deploy?"})
-	f.Notification("s2", interaction.NotificationPayload{Message: "hi", Urgency: access.PushUrgencyHigh})
+	f.Question("s1", 1, interaction.QuestionPayload{Header: "Deploy?"})
+	f.Notification("s2", 2, interaction.NotificationPayload{Message: "hi", Urgency: access.PushUrgencyHigh}, nil)
 
 	if got := len(web.recorded()); got != 2 {
 		t.Fatalf("push lane fired %d times, want 2", got)
@@ -185,8 +186,11 @@ func TestPushFanoutLanesDeliverIndependently(t *testing.T) {
 			}()
 		},
 	}
+	completed := make(chan error, 1)
 
-	f.Notification("s1", interaction.NotificationPayload{Message: "done", Urgency: "normal"})
+	f.Notification("s1", 1, interaction.NotificationPayload{Message: "done", Urgency: "normal"}, func(err error) {
+		completed <- err
+	})
 
 	deadline := time.After(5 * time.Second)
 	for len(apns.recorded()) == 0 {
@@ -196,8 +200,16 @@ func TestPushFanoutLanesDeliverIndependently(t *testing.T) {
 		case <-time.After(time.Millisecond):
 		}
 	}
+	select {
+	case err := <-completed:
+		t.Fatalf("notification completed before the stuck lane settled: %v", err)
+	default:
+	}
 	close(stuck.release)
 	wg.Wait()
+	if err := <-completed; err != nil {
+		t.Fatalf("notification completion: %v", err)
+	}
 
 	got := apns.recorded()
 	want := access.PushPayload{Type: interaction.EventNotification, Subject: "s1", Body: "done", Urgency: "normal"}

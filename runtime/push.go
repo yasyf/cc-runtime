@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"log"
 	"regexp"
 	"sync"
@@ -42,7 +43,7 @@ type pushSender interface {
 // unattended, additively to the push lanes. mesh.Router implements it; a nil
 // router disables routing, keeping the local-only path unchanged.
 type interactionRouter interface {
-	Route(ctx context.Context, subjectID, header string) (string, error)
+	Route(ctx context.Context, subjectID string, eventID int64, header string) (string, error)
 }
 
 // pushFanout bridges interaction's append fan-out to the access plane's push
@@ -64,7 +65,7 @@ func (f *pushFanout) setSenders(senders []pushSender) {
 	f.senders = append([]pushSender(nil), senders...)
 }
 
-func (f *pushFanout) Question(subjectID string, q interaction.QuestionPayload) {
+func (f *pushFanout) Question(subjectID string, eventID int64, q interaction.QuestionPayload) {
 	f.deliver(access.PushPayload{
 		Type:    interaction.EventQuestion,
 		Subject: subjectID,
@@ -72,19 +73,70 @@ func (f *pushFanout) Question(subjectID string, q interaction.QuestionPayload) {
 		Body:    q.Prompt,
 		Urgency: access.PushUrgencyHigh,
 	})
-	f.route(subjectID, q.Header)
+	f.route(subjectID, eventID, q.Header)
 }
 
-func (f *pushFanout) Notification(subjectID string, n interaction.NotificationPayload) {
-	f.deliver(access.PushPayload{
+func (f *pushFanout) Notification(subjectID string, eventID int64, n interaction.NotificationPayload, complete func(error)) {
+	payload := access.PushPayload{
 		Type:    interaction.EventNotification,
 		Subject: subjectID,
 		Body:    n.Message,
 		Urgency: n.Urgency,
-	})
-	if n.Urgency == access.PushUrgencyHigh {
-		f.route(subjectID, n.Message)
 	}
+	f.background(func(ctx context.Context) {
+		err := f.deliverNotification(ctx, payload, subjectID, eventID, n)
+		if complete != nil {
+			complete(err)
+		}
+	})
+}
+
+func (f *pushFanout) deliverNotification(ctx context.Context, payload access.PushPayload, subjectID string, eventID int64, n interaction.NotificationPayload) error {
+	f.mu.RLock()
+	senders := append([]pushSender(nil), f.senders...)
+	f.mu.RUnlock()
+	count := len(senders)
+	if n.Urgency == access.PushUrgencyHigh && f.router != nil {
+		count++
+	}
+	errs := make(chan error, count)
+	var wg sync.WaitGroup
+	for _, sender := range senders {
+		wg.Add(1)
+		go func(sender pushSender) {
+			defer wg.Done()
+			laneCtx, cancel := context.WithTimeout(ctx, pushTimeout)
+			defer cancel()
+			if err := sender.Fanout(laneCtx, payload); err != nil {
+				log.Printf("[%s] push fanout: %s", interaction.AppName, redactDeviceTokens(err.Error()))
+				errs <- err
+			}
+		}(sender)
+	}
+	if n.Urgency == access.PushUrgencyHigh && f.router != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			routeCtx, cancel := context.WithTimeout(ctx, routeTimeout)
+			defer cancel()
+			target, err := f.router.Route(routeCtx, subjectID, eventID, n.Message)
+			if err != nil {
+				log.Printf("[%s] presence route: %v", interaction.AppName, err)
+				errs <- err
+				return
+			}
+			if target != "" {
+				log.Printf("[%s] surfaced subject %s on attended peer %s", interaction.AppName, subjectID, hostregistry.HostNode(target))
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	var joined []error
+	for err := range errs {
+		joined = append(joined, err)
+	}
+	return errors.Join(joined...)
 }
 
 // deliver runs each lane's fan-out on its own goroutine with its own deadline,
@@ -110,14 +162,14 @@ func (f *pushFanout) deliver(p access.PushPayload) {
 // route surfaces the interaction on an attended peer off the handler's goroutine.
 // It is best-effort and additive: any error only logs, and the push lanes above
 // have already fired regardless of the routing outcome.
-func (f *pushFanout) route(subjectID, header string) {
+func (f *pushFanout) route(subjectID string, eventID int64, header string) {
 	if f.router == nil {
 		return
 	}
 	f.background(func(ctx context.Context) {
 		ctx, cancel := context.WithTimeout(ctx, routeTimeout)
 		defer cancel()
-		target, err := f.router.Route(ctx, subjectID, header)
+		target, err := f.router.Route(ctx, subjectID, eventID, header)
 		if err != nil {
 			log.Printf("[%s] presence route: %v", interaction.AppName, err)
 			return

@@ -5,8 +5,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yasyf/cc-interact/daemon"
-
 	"github.com/yasyf/cc-runtime/version"
 )
 
@@ -35,15 +33,5 @@ func TestVersionFlag(t *testing.T) {
 	}
 	if got := strings.TrimSpace(out.String()); got != version.Version {
 		t.Fatalf("--version output = %q, want the bare version %q", got, version.Version)
-	}
-}
-
-func TestDaemonStopControlCommandHidden(t *testing.T) {
-	command, _, err := Root().Find([]string{daemon.StopControlCommand})
-	if err != nil {
-		t.Fatalf("find stop control command: %v", err)
-	}
-	if !command.Hidden {
-		t.Fatal("daemon stop control command must stay hidden")
 	}
 }

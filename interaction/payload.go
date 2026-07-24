@@ -32,6 +32,7 @@ type AnswerPayload struct {
 
 // NotificationPayload is a one-way message appended to a subject's log.
 type NotificationPayload struct {
-	Message string `json:"message"`
-	Urgency string `json:"urgency,omitempty"`
+	Message     string `json:"message"`
+	Urgency     string `json:"urgency,omitempty"`
+	DeliveryKey string `json:"delivery_key,omitempty"`
 }

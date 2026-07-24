@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/yasyf/daemonkit/proc"
@@ -20,7 +19,6 @@ import (
 
 const (
 	lockWait           = 30 * time.Second
-	settlementTimeout  = 30 * time.Second
 	commandTimeout     = 12 * time.Minute
 	commandInputLimit  = 16 << 20
 	commandOutputLimit = 16 << 20
@@ -28,9 +26,11 @@ const (
 	ownerSchemaV1      = 1
 )
 
+var settlementTimeout = 30 * time.Second
+
 // Owner is one durable disposable-process owner.
 type Owner struct {
-	mu             sync.Mutex
+	lifecycle      chan struct{}
 	pool           *worker.Pool
 	claim          *worker.RuntimeClaim
 	reaper         *proc.Reaper
@@ -116,7 +116,9 @@ func newOwner(storePath string, generation proc.OwnerGeneration, limit int) (*Ow
 	if err != nil {
 		return nil, err
 	}
-	return &Owner{pool: pool, claim: claim, reaper: reaper, storePath: storePath}, nil
+	lifecycle := make(chan struct{}, 1)
+	lifecycle <- struct{}{}
+	return &Owner{lifecycle: lifecycle, pool: pool, claim: claim, reaper: reaper, storePath: storePath}, nil
 }
 
 func randomGeneration() (proc.OwnerGeneration, error) {
@@ -281,10 +283,23 @@ func (o *Owner) Runner() *worker.Pool { return o.pool }
 
 // Recover settles every prior-generation process and receipt.
 func (o *Owner) Recover(ctx context.Context) error {
-	o.mu.Lock()
-	defer o.mu.Unlock()
+	if err := o.acquire(ctx); err != nil {
+		return err
+	}
+	defer o.release()
 	return o.recoverLocked(ctx)
 }
+
+func (o *Owner) acquire(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-o.lifecycle:
+		return nil
+	}
+}
+
+func (o *Owner) release() { o.lifecycle <- struct{}{} }
 
 func (o *Owner) recoverLocked(ctx context.Context) error {
 	if o.closed {
@@ -313,13 +328,15 @@ func (o *Owner) recoverLocked(ctx context.Context) error {
 
 // Close stops admission, reaps every task, and retires the owner record.
 func (o *Owner) Close(ctx context.Context) error {
-	o.mu.Lock()
-	defer o.mu.Unlock()
+	settleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), settlementTimeout)
+	defer cancel()
+	if err := o.acquire(settleCtx); err != nil {
+		return err
+	}
+	defer o.release()
 	if o.closed {
 		return nil
 	}
-	settleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), settlementTimeout)
-	defer cancel()
 	if err := o.recoverLocked(settleCtx); err != nil {
 		return err
 	}

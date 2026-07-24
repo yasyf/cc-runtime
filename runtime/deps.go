@@ -2,15 +2,14 @@ package runtime
 
 import (
 	"context"
-	"fmt"
-	"os/exec"
-	"path/filepath"
+	"os"
 
 	"github.com/yasyf/cc-interact/channel"
 	"github.com/yasyf/cc-interact/cmd"
 	"github.com/yasyf/cc-interact/daemon"
-	"github.com/yasyf/daemonkit/daemonrole"
 	"github.com/yasyf/daemonkit/paths"
+	"github.com/yasyf/daemonkit/service"
+	"github.com/yasyf/daemonkit/trust"
 
 	"github.com/yasyf/cc-runtime/interaction"
 	"github.com/yasyf/cc-runtime/version"
@@ -18,30 +17,45 @@ import (
 
 func appPaths() paths.Paths { return interaction.AppPaths() }
 
-func daemonRole() (daemonrole.Classifier, error) {
-	rolePath, err := exec.LookPath("cc-runtime")
+func daemonAgent() (service.Agent, error) {
+	executable, err := service.CanonicalExecutable()
 	if err != nil {
-		return daemonrole.Classifier{}, fmt.Errorf("resolve cc-runtime role alias: %w", err)
+		return service.Agent{}, err
 	}
-	rolePath, err = filepath.Abs(rolePath)
-	if err != nil {
-		return daemonrole.Classifier{}, fmt.Errorf("resolve absolute cc-runtime role alias: %w", err)
+	return service.Agent{
+		Label: "com.yasyf.cc-runtime", Program: executable, Args: []string{"daemon"},
+		LogPath: appPaths().LogPath(), RestartPolicy: service.RestartOnFailure,
+	}, nil
+}
+
+func daemonRoles() daemon.Roles {
+	return daemon.Roles{
+		Business: trust.UnprotectedRole, Lifecycle: "com.yasyf.cc-runtime.lifecycle.v1",
+		StopControl: "com.yasyf.cc-runtime.stop.v1",
 	}
-	role := daemonrole.Classifier{RoleID: "com.yasyf.cc-runtime", RolePath: filepath.Clean(rolePath)}
-	if err := role.Validate(); err != nil {
-		return daemonrole.Classifier{}, err
-	}
-	return role, nil
+}
+
+func daemonTrustPolicy() (trust.TrustPolicy, error) {
+	roles := daemonRoles()
+	requirement := trust.Requirement{TeamID: "SXKCTF23Q2", SigningIdentifier: "cc-runtime"}
+	return trust.NewTrustPolicy(trust.TrustPolicyConfig{
+		ExpectedUID: os.Geteuid(), AllowUnprotected: true,
+		Roles: map[trust.PeerRole]trust.Requirement{
+			roles.Lifecycle: requirement, roles.StopControl: requirement,
+		},
+		StopRoles: []trust.PeerRole{roles.StopControl}, ReceiptRoles: []trust.PeerRole{roles.Lifecycle},
+		ReadinessRoles: []trust.PeerRole{roles.Lifecycle},
+	})
 }
 
 func launcher() (daemon.Launcher, error) {
-	role, err := daemonRole()
+	agent, err := daemonAgent()
 	if err != nil {
 		return daemon.Launcher{}, err
 	}
 	return daemon.Launcher{
 		Paths: appPaths(), WireBuild: daemon.WireBuild, RuntimeBuild: version.Version,
-		Args: []string{"daemon"}, StopArgs: []string{daemon.StopControlCommand}, DaemonRole: role,
+		Agent: agent, Roles: daemonRoles(),
 	}, nil
 }
 
@@ -78,13 +92,6 @@ func deps() cmd.Deps {
 				return err
 			}
 			return launcher.Stop(ctx, daemon.UpgradeTimeout)
-		},
-		RunStopControl: func(ctx context.Context) error {
-			launcher, err := launcher()
-			if err != nil {
-				return err
-			}
-			return launcher.RunStopControl(ctx)
 		},
 		ClaudePID:     claudePID,
 		WindowAlive:   live,

@@ -59,12 +59,18 @@ func seedMesh(t *testing.T, self string, routeOff bool, hosts ...string) {
 	}
 	if _, err := Config.Update(context.Background(), func(g *hostregistry.Registry) error {
 		g.Self = self
-		for _, h := range hosts {
-			g.UpsertHost(h)
-		}
 		return nil
 	}); err != nil {
 		t.Fatalf("seed registry: %v", err)
+	}
+	for _, host := range hosts {
+		fact, err := hostregistry.NewSSHHostFact(host, "/opt/homebrew/bin/synckitd", nil)
+		if err != nil {
+			t.Fatalf("host fact: %v", err)
+		}
+		if err := Config.RegisterHost(context.Background(), fact); err != nil {
+			t.Fatalf("register host: %v", err)
+		}
 	}
 	if err := SetRouteOff(context.Background(), routeOff); err != nil {
 		t.Fatalf("seed route off: %v", err)
@@ -108,7 +114,7 @@ func TestRouteAttendedLocalNoWalk(t *testing.T) {
 		Dial:     mockDialer(map[string]*MockRunner{"u@peer": peer}),
 		Attended: attendedFn(true),
 	}
-	target, err := r.Route(context.Background(), "subj-1", "Deploy?")
+	target, err := r.Route(context.Background(), "subj-1", 1, "Deploy?")
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}
@@ -131,7 +137,7 @@ func TestRouteFirstAttendedWins(t *testing.T) {
 		Dial:     mockDialer(map[string]*MockRunner{"u@p1": p1, "u@p2": p2, "u@p3": p3}),
 		Attended: attendedFn(false),
 	}
-	target, err := r.Route(context.Background(), "subj-9", "Ship it?")
+	target, err := r.Route(context.Background(), "subj-9", 9, "Ship it?")
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}
@@ -145,13 +151,15 @@ func TestRouteFirstAttendedWins(t *testing.T) {
 		t.Fatalf("a non-winning peer was surfaced (p1=%v p3=%v)", surfaced(p1), surfaced(p3))
 	}
 	call := notifyCall(t, p2, "u@p2")
-	// Non-idempotent write: single dial attempt, never the failover leg.
-	if call.Kind != "ssh-once" {
-		t.Fatalf("surface kind = %q, want ssh-once (no failover re-run)", call.Kind)
+	if call.Kind != "ssh" {
+		t.Fatalf("surface kind = %q, want canonical failover ssh", call.Kind)
 	}
 	var got interaction.NotificationPayload
 	if err := json.Unmarshal([]byte(call.Stdin), &got); err != nil {
 		t.Fatalf("decode surfaced payload off stdin: %v", err)
+	}
+	if got.DeliveryKey != "routed:me@origin.tail.ts.net:subj-9:9" {
+		t.Fatalf("delivery key = %q, want stable origin event key", got.DeliveryKey)
 	}
 	if got.Urgency != "" {
 		t.Fatalf("surfaced urgency = %q, want empty so the peer never re-routes it", got.Urgency)
@@ -184,7 +192,7 @@ func TestRouteFallsOverToNextAttendedPeer(t *testing.T) {
 		Dial:     mockDialer(map[string]*MockRunner{"u@p1": p1, "u@p2": p2}),
 		Attended: attendedFn(false),
 	}
-	target, err := r.Route(context.Background(), "subj-10", "?")
+	target, err := r.Route(context.Background(), "subj-10", 10, "?")
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}
@@ -193,6 +201,17 @@ func TestRouteFallsOverToNextAttendedPeer(t *testing.T) {
 	}
 	if !surfaced(p1) || !surfaced(p2) {
 		t.Fatalf("surface attempts p1=%v p2=%v, want both in order", surfaced(p1), surfaced(p2))
+	}
+	first, second := notifyCall(t, p1, "u@p1"), notifyCall(t, p2, "u@p2")
+	var firstNote, secondNote interaction.NotificationPayload
+	if err := json.Unmarshal([]byte(first.Stdin), &firstNote); err != nil {
+		t.Fatalf("decode p1 notification: %v", err)
+	}
+	if err := json.Unmarshal([]byte(second.Stdin), &secondNote); err != nil {
+		t.Fatalf("decode p2 notification: %v", err)
+	}
+	if firstNote.DeliveryKey == "" || firstNote.DeliveryKey != secondNote.DeliveryKey {
+		t.Fatalf("failover delivery keys = (%q, %q), want one stable key", firstNote.DeliveryKey, secondNote.DeliveryKey)
 	}
 }
 
@@ -205,10 +224,6 @@ func (wedgedSurfaceRunner) Local(context.Context, []byte, string, ...string) (st
 }
 
 func (wedgedSurfaceRunner) SSH(ctx context.Context, _, remoteCmd string, _ []byte) (string, error) {
-	return wedgeOrPresence(ctx, remoteCmd)
-}
-
-func (wedgedSurfaceRunner) SSHOnce(ctx context.Context, _, remoteCmd string, _ []byte) (string, error) {
 	return wedgeOrPresence(ctx, remoteCmd)
 }
 
@@ -237,7 +252,7 @@ func TestRouteWedgedSurfaceFallsOverWithLiveContext(t *testing.T) {
 		Attended:       attendedFn(false),
 		attemptTimeout: 50 * time.Millisecond,
 	}
-	target, err := r.Route(context.Background(), "subj-13", "?")
+	target, err := r.Route(context.Background(), "subj-13", 13, "?")
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}
@@ -263,7 +278,7 @@ func TestRouteAllSurfacesFailReturnsError(t *testing.T) {
 		Dial:     mockDialer(map[string]*MockRunner{"u@p1": failing(), "u@p2": failing()}),
 		Attended: attendedFn(false),
 	}
-	target, err := r.Route(context.Background(), "subj-11", "?")
+	target, err := r.Route(context.Background(), "subj-11", 11, "?")
 	if target != "" || err == nil {
 		t.Fatalf("target=%q err=%v, want no surface and the joined failures", target, err)
 	}
@@ -287,11 +302,6 @@ func (slowRunner) SSH(ctx context.Context, _, _ string, _ []byte) (string, error
 	return "", ctx.Err()
 }
 
-func (slowRunner) SSHOnce(ctx context.Context, _, _ string, _ []byte) (string, error) {
-	<-ctx.Done()
-	return "", ctx.Err()
-}
-
 // TestRouteSlowProbeDoesNotDelayDecidedPrefix proves routing surfaces on an
 // already-decided attended peer without waiting for a slower peer's probe.
 func TestRouteSlowProbeDoesNotDelayDecidedPrefix(t *testing.T) {
@@ -307,7 +317,7 @@ func TestRouteSlowProbeDoesNotDelayDecidedPrefix(t *testing.T) {
 		},
 		Attended: attendedFn(false),
 	}
-	target, err := r.Route(context.Background(), "subj-12", "?")
+	target, err := r.Route(context.Background(), "subj-12", 12, "?")
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}
@@ -326,7 +336,7 @@ func TestRouteDeadPeerSkipped(t *testing.T) {
 		Dial:     mockDialer(map[string]*MockRunner{"u@dead": dead, "u@live": live}),
 		Attended: attendedFn(false),
 	}
-	target, err := r.Route(context.Background(), "subj-2", "?")
+	target, err := r.Route(context.Background(), "subj-2", 2, "?")
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}
@@ -345,7 +355,7 @@ func TestRouteAllUnattendedFallsBack(t *testing.T) {
 		Dial:     mockDialer(map[string]*MockRunner{"u@dead": dead, "u@off": off}),
 		Attended: attendedFn(false),
 	}
-	target, err := r.Route(context.Background(), "subj-3", "?")
+	target, err := r.Route(context.Background(), "subj-3", 3, "?")
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}
@@ -367,7 +377,7 @@ func TestRouteOffDisablesWalk(t *testing.T) {
 		Dial:     mockDialer(map[string]*MockRunner{"u@peer": peer}),
 		Attended: attendedFn(false),
 	}
-	target, err := r.Route(context.Background(), "subj-4", "?")
+	target, err := r.Route(context.Background(), "subj-4", 4, "?")
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}
@@ -387,7 +397,7 @@ func TestRouteNoPeersFallsBack(t *testing.T) {
 		Dial:     mockDialer(map[string]*MockRunner{}),
 		Attended: attendedFn(false),
 	}
-	target, err := r.Route(context.Background(), "subj-5", "?")
+	target, err := r.Route(context.Background(), "subj-5", 5, "?")
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}
@@ -408,7 +418,7 @@ func TestRouteSurfaceErrorPropagates(t *testing.T) {
 		Dial:     mockDialer(map[string]*MockRunner{"u@peer": peer}),
 		Attended: attendedFn(false),
 	}
-	if _, err := r.Route(context.Background(), "subj-6", "?"); err == nil {
+	if _, err := r.Route(context.Background(), "subj-6", 6, "?"); err == nil {
 		t.Fatal("Route returned nil, want the failed surface propagated")
 	}
 }
@@ -417,7 +427,7 @@ func TestRouteSurfaceErrorPropagates(t *testing.T) {
 // and header, carries no bearer token, and has an empty urgency so the receiving
 // peer never bounces it onward.
 func TestRoutedNotificationShape(t *testing.T) {
-	n := RoutedNotification("alice@mac.tail.ts.net", "interaction-abcd", "Approve deploy?")
+	n := RoutedNotification("alice@mac.tail.ts.net", "interaction-abcd", 42, "Approve deploy?")
 	if n.Urgency != "" {
 		t.Fatalf("urgency = %q, want empty", n.Urgency)
 	}
@@ -431,15 +441,16 @@ func TestRoutedNotificationShape(t *testing.T) {
 			t.Fatalf("message %q leaked %q", n.Message, forbidden)
 		}
 	}
-	// Marshaled, the payload is exactly {message,urgency} — no field can carry a
-	// secret.
+	if n.DeliveryKey != "routed:alice@mac.tail.ts.net:interaction-abcd:42" {
+		t.Fatalf("delivery key = %q", n.DeliveryKey)
+	}
 	b, _ := json.Marshal(n)
 	var raw map[string]any
 	if err := json.Unmarshal(b, &raw); err != nil {
 		t.Fatalf("marshal round-trip: %v", err)
 	}
-	if _, ok := raw["message"]; !ok || len(raw) != 1 {
-		t.Fatalf("payload fields = %v, want only message (urgency omitempty)", raw)
+	if _, ok := raw["message"]; !ok || len(raw) != 2 {
+		t.Fatalf("payload fields = %v, want message and delivery_key", raw)
 	}
 }
 
