@@ -12,7 +12,7 @@ require (
 	github.com/mdp/qrterminal/v3 v3.2.1
 	github.com/shirou/gopsutil/v4 v4.26.5
 	github.com/spf13/cobra v1.10.2
-	github.com/yasyf/cc-interact v0.29.0
+	github.com/yasyf/cc-interact v0.30.0
 	github.com/yasyf/daemonkit v0.18.0
 	github.com/yasyf/synckit v0.35.1
 	golang.org/x/net v0.57.0
