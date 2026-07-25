@@ -6,6 +6,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-07-24
+
+### Changed
+- Pin daemonkit v0.18.0, cc-interact v0.29.0, and synckit v0.35.1.
+- Dispatch daemonkit's dedicated trust-verifier child from production and test
+  executables, with verifier work isolated behind daemonkit-owned budgets.
+
 ## [0.16.0] - 2026-07-24
 
 ### Changed
@@ -231,7 +238,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Builds no longer depend on an absolute local path: the temporary
   `cc-interact` replace is the relative sibling checkout, which CI clones.
 
-[Unreleased]: https://github.com/yasyf/cc-runtime/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/yasyf/cc-runtime/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/yasyf/cc-runtime/compare/v0.16.0...v0.17.0
+[0.16.0]: https://github.com/yasyf/cc-runtime/compare/v0.15.0...v0.16.0
+[0.15.0]: https://github.com/yasyf/cc-runtime/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/yasyf/cc-runtime/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/yasyf/cc-runtime/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/yasyf/cc-runtime/compare/v0.12.0...v0.13.0

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/yasyf/daemonkit/proc"
+	"github.com/yasyf/daemonkit/trust"
 	"github.com/yasyf/daemonkit/worker"
 )
 
@@ -112,7 +113,7 @@ func newOwner(storePath string, generation proc.OwnerGeneration, limit int) (*Ow
 	if err != nil {
 		return nil, err
 	}
-	claim, err := pool.ClaimRuntime()
+	claim, err := pool.ClaimRuntime(trust.VerifierWorkerBudgets())
 	if err != nil {
 		return nil, err
 	}
