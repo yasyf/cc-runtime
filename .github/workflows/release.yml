@@ -24,7 +24,7 @@ jobs:
 
   release:
     needs: release-preflight
-    uses: yasyf/homebrew-tap/.github/workflows/release-go.yml@ece42cf8ab45ff65af679a43896ea19399e242ee
+    uses: yasyf/homebrew-tap/.github/workflows/release-go.yml@7cc8a6c981cbec10fcb7f19bd75b36e9ee65ea7e
     secrets: inherit
     with:
       plugin-manifest: plugin/.claude-plugin/plugin.json
