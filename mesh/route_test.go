@@ -53,7 +53,9 @@ func deadPeer() *MockRunner {
 func seedMesh(t *testing.T, self string, routeOff bool, hosts ...string) {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", "")
-	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("DAEMONKIT_HOME", dir)
 	if err := Initialize(context.Background()); err != nil {
 		t.Fatalf("initialize mesh: %v", err)
 	}

@@ -14,8 +14,10 @@ import (
 
 const testTarget = "bob@srv.tail.ts.net"
 
-// isolateHome points HOME (and clears XDG_CONFIG_HOME) at a fresh temp dir so
-// AddHost writes an isolated shared state.json.
+// isolateHome points HOME and daemonkit's own home override (and clears
+// XDG_CONFIG_HOME) at a fresh temp dir so AddHost writes an isolated shared
+// state.json. daemonkit resolves the home directory through the passwd database
+// and ignores HOME, so both must be set.
 func isolateHome(t *testing.T) {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", "")
@@ -26,6 +28,7 @@ func isolateHome(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", home)
+	t.Setenv("DAEMONKIT_HOME", home)
 	sshDir := filepath.Join(home, ".ssh")
 	if err := os.MkdirAll(sshDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -51,6 +54,7 @@ func TestAddHostDetectsSelfAndCrossRegisters(t *testing.T) {
 	r := hostregistry.NewMockRunner().
 		OnLocal("tailscale status --json", `{"BackendState":"Running","Self":{"DNSName":"mac.tail.ts.net."}}`, nil).
 		OnLocal("id -un", "alice\n", nil).
+		OnSSH("uname -s", "Darwin\n", nil).
 		OnSSH("command -v cc-runtime", "/usr/local/bin/cc-runtime\n", nil).
 		OnSSH("command -v synckitd", "/opt/homebrew/bin/synckitd\n", nil).
 		OnSSH("host add", "", nil).
@@ -98,6 +102,7 @@ func TestAddHostExplicitSelfSkipsDetection(t *testing.T) {
 	isolateHome(t)
 	// No OnLocal scripted: any DetectSelf call would error unscripted.
 	r := hostregistry.NewMockRunner().
+		OnSSH("uname -s", "Darwin\n", nil).
 		OnSSH("command -v cc-runtime", "/usr/local/bin/cc-runtime\n", nil).
 		OnSSH("command -v synckitd", "/opt/homebrew/bin/synckitd\n", nil).
 		OnSSH("host add", "", nil).
@@ -148,6 +153,7 @@ func TestAddHostBinaryMissingAborts(t *testing.T) {
 func TestAddHostNoRecurseSkipsInverse(t *testing.T) {
 	isolateHome(t)
 	r := hostregistry.NewMockRunner().
+		OnSSH("uname -s", "Darwin\n", nil).
 		OnSSH("command -v cc-runtime", "/usr/local/bin/cc-runtime\n", nil).
 		OnSSH("command -v synckitd", "/opt/homebrew/bin/synckitd\n", nil).
 		DefaultSSH("", nil)

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/yasyf/cc-interact/cmd"
+	"github.com/yasyf/cc-interact/daemon"
 
 	"github.com/yasyf/cc-runtime/interaction"
 )
@@ -16,7 +17,7 @@ import (
 func (e *e2e) answerDeps() cmd.Deps {
 	return cmd.Deps{
 		Paths:         interaction.AppPaths(),
-		NewClient:     e.launcher.NewClient,
+		NewClient:     func(context.Context) (*daemon.Client, error) { return e.launcher.NewClient() },
 		EnsureCurrent: func(context.Context) error { return nil },
 	}
 }

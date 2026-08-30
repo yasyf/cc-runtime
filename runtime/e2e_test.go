@@ -11,10 +11,7 @@ import (
 	"github.com/yasyf/cc-interact/daemon"
 	"github.com/yasyf/cc-interact/store"
 	"github.com/yasyf/cc-interact/subject"
-	dkdaemon "github.com/yasyf/daemonkit/daemon"
-	"github.com/yasyf/daemonkit/service"
-	"github.com/yasyf/daemonkit/trust"
-	"github.com/yasyf/daemonkit/wire"
+	"github.com/yasyf/daemonkit"
 
 	"github.com/yasyf/cc-runtime/access"
 	"github.com/yasyf/cc-runtime/interaction"
@@ -38,86 +35,56 @@ type e2e struct {
 	launcher daemon.Launcher
 }
 
-// shortTempHome returns a short-pathed temp HOME so the daemon's unix socket
-// stays under the macOS sun_path limit (~104 bytes); t.TempDir()'s long
-// /var/folders path would blow past it.
-func shortTempHome(t *testing.T) string {
+// isolateHome points HOME and daemonkit's own home override at one short-pathed
+// temp dir, so the daemon's unix socket stays under the macOS sun_path limit
+// (~104 bytes) that t.TempDir()'s long /var/folders path would blow past, and
+// nothing escapes into the developer's real home. daemonkit resolves the home
+// directory through the passwd database and ignores HOME, so both must be set.
+func isolateHome(t *testing.T) {
 	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "ccre")
 	if err != nil {
 		t.Fatalf("mkdir temp home: %v", err)
 	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	return filepath.Clean(dir)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	dir = filepath.Clean(dir)
+	t.Setenv("HOME", dir)
+	t.Setenv("DAEMONKIT_HOME", dir)
 }
 
-func testDaemonAgent(t *testing.T) service.Agent {
+// testServeSpec is the e2e daemon's identity. It is the production one: the
+// endpoint derives from the label, so the commands under test — which build
+// their own clients from DaemonSpec — reach this daemon only when it serves
+// under that same identity. isolateHome keeps the state it derives inside the
+// test's temp home.
+func testServeSpec(t *testing.T) daemonkit.Daemon {
 	t.Helper()
-	executable, err := service.CanonicalExecutable()
+	spec, err := interaction.DaemonSpec()
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("DaemonSpec: %v", err)
 	}
-	return service.Agent{
-		Label: "com.yasyf.cc-runtime.test", Program: executable, Args: []string{"daemon"},
-		LogPath: interaction.AppPaths().LogPath(), RestartPolicy: service.RestartOnFailure,
-	}
+	return spec
 }
 
-func testDaemonRoles() daemon.Roles {
-	return daemon.Roles{
-		Business: trust.UnprotectedRole, Lifecycle: "com.yasyf.cc-runtime.test.lifecycle.v1",
-		StopControl: "com.yasyf.cc-runtime.test.stop.v1",
-	}
-}
-
-func testDaemonTrustPolicy(t *testing.T) trust.TrustPolicy {
+// awaitBusiness polls the business lane until the served daemon dispatches,
+// returning a connected client.
+func awaitBusiness(t *testing.T, spec daemonkit.Daemon) *daemon.Client {
 	t.Helper()
-	roles := testDaemonRoles()
-	policy, err := trust.NewTrustPolicy(trust.TrustPolicyConfig{
-		ExpectedUID: os.Geteuid(), AllowUnprotected: true,
-		Roles: map[trust.PeerRole]trust.Requirement{
-			roles.Lifecycle:   {TeamID: "TESTTEAM", SigningIdentifier: "com.yasyf.cc-runtime.test.lifecycle"},
-			roles.StopControl: {TeamID: "TESTTEAM", SigningIdentifier: "com.yasyf.cc-runtime.test.stop"},
-		},
-		StopRoles: []trust.PeerRole{roles.StopControl}, ReceiptRoles: []trust.PeerRole{roles.Lifecycle},
-		ReadinessRoles: []trust.PeerRole{roles.Lifecycle},
-	})
+	client, err := daemon.NewClient(spec)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("NewClient: %v", err)
 	}
-	return policy
-}
-
-func waitE2EClient(t *testing.T, launcher daemon.Launcher) *daemon.Client {
-	t.Helper()
+	t.Cleanup(func() { _ = client.Close() })
 	deadline := time.Now().Add(5 * time.Second)
-	var (
-		client *daemon.Client
-		health daemon.RuntimeHealth
-		err    error
-	)
 	for {
-		if client == nil {
-			client, err = launcher.NewClient(context.Background())
-		}
-		if err == nil {
-			health, err = client.RuntimeHealth(context.Background())
-			if err == nil && health.RuntimeBuild == launcher.RuntimeBuild &&
-				health.RuntimeProtocol == int(wire.ProtocolVersion) && health.ProcessGeneration != "" &&
-				health.Ready && health.State == dkdaemon.StateHealthy && !health.Draining {
-				t.Cleanup(func() { _ = client.Close() })
-				return client
-			}
-			if err != nil {
-				_ = client.Close()
-				client = nil
-			}
+		probeCtx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+		reply, err := client.Do(probeCtx, daemon.Envelope{Op: daemon.OpStatus, Scope: e2eScope})
+		cancel()
+		if err == nil && reply.OK {
+			return client
 		}
 		if time.Now().After(deadline) {
-			if client != nil {
-				_ = client.Close()
-			}
-			t.Fatalf("daemon readiness: health=%+v err=%v", health, err)
+			t.Fatalf("daemon readiness: reply=%+v err=%v", reply, err)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -125,10 +92,10 @@ func waitE2EClient(t *testing.T, launcher daemon.Launcher) *daemon.Client {
 
 func newE2E(t *testing.T) *e2e {
 	t.Helper()
-	t.Setenv("HOME", shortTempHome(t))
+	isolateHome(t)
+	spec := testServeSpec(t)
 	testLauncher := daemon.Launcher{
-		Paths: interaction.AppPaths(), WireBuild: daemon.WireBuild, RuntimeBuild: version.Version,
-		Agent: testDaemonAgent(t), Roles: testDaemonRoles(),
+		Daemon: spec, Paths: interaction.AppPaths(), RuntimeBuild: version.Version,
 	}
 	accessState := access.Store{Dir: interaction.AppPaths().StateDir()}
 	if err := accessState.WriteConfig(access.Config{Bind: access.BindLoopback}); err != nil {
@@ -138,16 +105,16 @@ func newE2E(t *testing.T) *e2e {
 		t.Fatalf("write disabled apns config: %v", err)
 	}
 
-	processes, err := processowner.New(interaction.AppPaths().StateDir(), "e2e-mesh-processes.db", 4)
+	processes, err := processowner.Open(t.Context(), interaction.AppPaths().StateDir(), "e2e-mesh-processes.db")
 	if err != nil {
 		t.Fatalf("process owner: %v", err)
 	}
 	t.Cleanup(func() {
-		if err := processes.Close(context.Background()); err != nil {
+		if err := processowner.Close(context.Background(), processes); err != nil {
 			t.Errorf("close process owner: %v", err)
 		}
 	})
-	s, err := buildServer(t.Context(), testDaemonTrustPolicy(t), testDaemonRoles(), processes)
+	s, err := buildServer(t.Context(), spec, processes)
 	if err != nil {
 		t.Fatalf("buildServer: %v", err)
 	}
@@ -164,7 +131,7 @@ func newE2E(t *testing.T) *e2e {
 		}
 	})
 
-	client := waitE2EClient(t, testLauncher)
+	client := awaitBusiness(t, spec)
 
 	// A read-only resolver over the daemon's own DB, mirroring buildServer's
 	// subject wiring, so the test can pull the exact subject.Subject the gate

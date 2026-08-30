@@ -10,7 +10,6 @@ import (
 
 	"github.com/yasyf/cc-interact/channel"
 	"github.com/yasyf/cc-interact/daemon"
-	"github.com/yasyf/daemonkit/trust"
 )
 
 // notifyMethod is the JSON-RPC method each subject event is pushed under on the
@@ -46,6 +45,17 @@ const askPollTimeout = 5 * time.Second
 // non-error pending string; the edit gate is the backstop that keeps the agent
 // from proceeding.
 const askBudget = 4 * time.Minute
+
+// newChannelClient opens the business lane of cc-runtime's daemon. The channel
+// server is a separate stdio process, so every tool handler round-trips over it
+// rather than appending directly.
+func newChannelClient() (*daemon.Client, error) {
+	spec, err := DaemonSpec()
+	if err != nil {
+		return nil, err
+	}
+	return daemon.NewClient(spec)
+}
 
 func askToolSchema() map[string]any {
 	return map[string]any{
@@ -178,9 +188,7 @@ func ChannelTools(_ context.Context, session, scope string, pid int) ([]channel.
 		Description: "Ask the human a question with structured options; remotely answerable and persisted for the session. Use this instead of the native AskUserQuestion. Blocks your edits until the human responds.",
 		InputSchema: askToolSchema(),
 		Handler: func(ctx context.Context, args json.RawMessage, _ func(string)) (string, bool) {
-			client, err := daemon.NewClient(ctx, daemon.ClientConfig{
-				Socket: AppPaths().SocketPath(), WireBuild: daemon.WireBuild, Role: trust.UnprotectedRole,
-			})
+			client, err := newChannelClient()
 			if err != nil {
 				return "ask failed: " + err.Error(), true
 			}
@@ -214,9 +222,7 @@ func ChannelTools(_ context.Context, session, scope string, pid int) ([]channel.
 		Description: "Send the human a notification, delivered remotely to the web app or phone. Use this instead of PushNotification.",
 		InputSchema: notifyToolSchema(),
 		Handler: func(ctx context.Context, args json.RawMessage, _ func(string)) (string, bool) {
-			client, err := daemon.NewClient(ctx, daemon.ClientConfig{
-				Socket: AppPaths().SocketPath(), WireBuild: daemon.WireBuild, Role: trust.UnprotectedRole,
-			})
+			client, err := newChannelClient()
 			if err != nil {
 				return "notify failed: " + err.Error(), true
 			}

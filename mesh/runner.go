@@ -8,11 +8,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yasyf/daemonkit/worker"
+	"github.com/yasyf/daemonkit"
 	"github.com/yasyf/synckit/hostregistry"
 )
 
-const runnerCommandTimeout = 12 * time.Minute
+const (
+	runnerCommandTimeout = 12 * time.Minute
+	runnerOutputLimit    = 16 << 20
+)
 
 // Runner executes the `cc-runtime rpc` passthrough for the mesh fan-out. Every
 // leg feeds the JSON params over stdin — never argv, which any process on
@@ -30,9 +33,9 @@ type Runner interface {
 
 // NewExecRunner returns the production Runner backed by runner's durable
 // process ownership.
-func NewExecRunner(runner *worker.Pool) Runner { return execRunner{runner: runner} }
+func NewExecRunner(runner hostregistry.Commander) Runner { return execRunner{runner: runner} }
 
-type execRunner struct{ runner *worker.Pool }
+type execRunner struct{ runner hostregistry.Commander }
 
 func (r execRunner) Local(ctx context.Context, stdin []byte, name string, args ...string) (string, error) {
 	executable, err := exec.LookPath(name)
@@ -51,8 +54,11 @@ func (r execRunner) SSH(ctx context.Context, target, remoteCmd string, stdin []b
 }
 
 func (r execRunner) run(ctx context.Context, stdin []byte, path string, args []string, label string) (string, error) {
-	result, err := r.runner.Run(ctx, worker.CommandRequest{
-		Path: path, Dir: filepath.Dir(path), Args: args, Stdin: stdin, TotalTimeout: runnerCommandTimeout,
+	runCtx, cancel := context.WithTimeout(ctx, runnerCommandTimeout)
+	defer cancel()
+	result, err := r.runner.Run(runCtx, daemonkit.Cmd{
+		Path: path, Dir: filepath.Dir(path), Args: args, Stdin: stdin,
+		Exec: daemonkit.ServingSameUser(), MaxOutput: runnerOutputLimit,
 	})
 	if err != nil {
 		return string(result.Stdout), fmt.Errorf("%s: %w: %s", label, err, strings.TrimSpace(string(result.Stderr)))

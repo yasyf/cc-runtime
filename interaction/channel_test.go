@@ -28,16 +28,17 @@ type channelHarness struct {
 
 func newChannelHarness(t *testing.T) *channelHarness {
 	t.Helper()
-	t.Setenv("HOME", shortTempHome(t))
-	p := AppPaths()
+	isolateHome(t)
+	spec, err := DaemonSpec()
+	if err != nil {
+		t.Fatalf("DaemonSpec: %v", err)
+	}
 
 	s, err := daemon.New(daemon.Config{
 		AppName:         AppName,
-		Paths:           p,
-		WireBuild:       daemon.WireBuild,
+		Paths:           AppPaths(),
+		Daemon:          spec,
 		RuntimeBuild:    "v0.0.0-test",
-		TrustPolicy:     testTrustPolicy(t),
-		Roles:           testRoles(),
 		ActiveStatuses:  ActiveStatuses,
 		Gate:            Gate(),
 		GateErrorReason: GateErrorReason,
@@ -60,7 +61,7 @@ func newChannelHarness(t *testing.T) *channelHarness {
 		}
 	})
 
-	client := waitReadyClient(t, p, "v0.0.0-test")
+	client := awaitBusiness(t, spec)
 
 	r, err := client.Do(context.Background(), daemon.Envelope{Op: OpList, Scope: testScope})
 	if err != nil {

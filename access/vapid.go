@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 
 	webpush "github.com/SherClockHolmes/webpush-go"
-	"github.com/yasyf/daemonkit/daemon"
+	"github.com/yasyf/daemonkit/durable"
 )
 
 // VAPIDKeys is the daemon's Web Push application-server keypair (RFC 8292).
@@ -62,7 +62,7 @@ func (s Store) mintVAPID() (VAPIDKeys, error) {
 	if err != nil {
 		return VAPIDKeys{}, err
 	}
-	if err := daemon.WriteFileDurable(s.VAPIDPath(), b, 0o600); err != nil {
+	if err := durable.WriteFile(s.VAPIDPath(), b, 0o600); err != nil {
 		return VAPIDKeys{}, fmt.Errorf("write vapid keys %q: %w", s.VAPIDPath(), err)
 	}
 	return k, nil

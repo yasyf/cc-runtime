@@ -5,123 +5,119 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/yasyf/daemonkit/proc"
-	"github.com/yasyf/daemonkit/worker"
+	"github.com/yasyf/daemonkit"
+	"github.com/yasyf/daemonkit/durable"
 )
 
-func TestIsolatedOwnersRunConcurrently(t *testing.T) {
+func scopeRecords(t *testing.T, root string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("read registry: %v", err)
+	}
+	var records []string
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), scopeSuffix+lockSuffix) {
+			records = append(records, entry.Name())
+		}
+	}
+	return records
+}
+
+func TestIsolatedScopesRunConcurrently(t *testing.T) {
 	dir := t.TempDir()
-	first, err := NewIsolated(context.Background(), dir, "tui", 2)
+	first, err := OpenIsolated(t.Context(), dir, "tui")
 	if err != nil {
-		t.Fatalf("first NewIsolated: %v", err)
-	}
-	second, err := NewIsolated(context.Background(), dir, "tui", 2)
-	if err != nil {
-		_ = first.Close(context.Background())
-		t.Fatalf("second NewIsolated: %v", err)
-	}
-	if first.recordPath == second.recordPath || first.storePath == second.storePath {
-		t.Fatalf("owners share state: first=%q second=%q", first.recordPath, second.recordPath)
-	}
-	if err := first.Recover(context.Background()); err != nil {
-		t.Fatalf("first Recover: %v", err)
-	}
-	if err := second.Recover(context.Background()); err != nil {
-		t.Fatalf("second Recover: %v", err)
-	}
-	if err := first.Close(context.Background()); err != nil {
-		t.Fatalf("first Close: %v", err)
-	}
-	if err := second.Close(context.Background()); err != nil {
-		t.Fatalf("second Close: %v", err)
-	}
-}
-
-func TestIsolatedOwnerRecoversOrphanedGeneration(t *testing.T) {
-	dir := t.TempDir()
-	root := filepath.Join(dir, "tui")
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	record := ownerRecord{
-		Schema: ownerSchemaV1, Generation: proc.OwnerGeneration{1},
-		Identity: proc.Identity{PID: os.Getpid(), StartTime: "dead", Boot: "old", Comm: "cc-runtime"},
-	}
-	record.Store = record.Generation.String() + ".db"
-	recordPath := filepath.Join(root, record.Generation.String()+".json")
-	if err := writeRecord(root, recordPath, record); err != nil {
-		t.Fatalf("write orphan: %v", err)
-	}
-
-	owner, err := NewIsolated(context.Background(), dir, "tui", 2)
-	if err != nil {
-		t.Fatalf("NewIsolated: %v", err)
-	}
-	if _, err := os.Stat(recordPath); !os.IsNotExist(err) {
-		_ = owner.Close(context.Background())
-		t.Fatalf("orphan record still exists: %v", err)
-	}
-	if err := owner.Close(context.Background()); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-}
-
-func TestOwnerCloseSettlesBeforeExplicitRecovery(t *testing.T) {
-	owner, err := New(t.TempDir(), "workers.db", 1)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	if err := owner.Close(t.Context()); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-}
-
-func TestOwnerCloseBoundsLifecycleAcquisition(t *testing.T) {
-	owner, err := New(t.TempDir(), "workers.db", 1)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	if err := owner.acquire(t.Context()); err != nil {
-		t.Fatalf("acquire lifecycle: %v", err)
-	}
-	previous := settlementTimeout
-	settlementTimeout = 20 * time.Millisecond
-	defer func() { settlementTimeout = previous }()
-	if err := owner.Close(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Close while lifecycle held = %v, want deadline exceeded", err)
-	}
-	settlementTimeout = previous
-	owner.release()
-	if err := owner.Close(context.Background()); err != nil {
-		t.Fatalf("Close after lifecycle release: %v", err)
-	}
-}
-
-func TestOwnerOpensAdmissionOnlyAfterRecovery(t *testing.T) {
-	owner, err := New(t.TempDir(), "workers.db", 1)
-	if err != nil {
-		t.Fatalf("New: %v", err)
+		t.Fatalf("first OpenIsolated: %v", err)
 	}
 	t.Cleanup(func() {
-		if err := owner.Close(context.Background()); err != nil {
-			t.Errorf("Close: %v", err)
+		if err := Close(context.Background(), first); err != nil {
+			t.Errorf("close first: %v", err)
 		}
 	})
-	request := worker.CommandRequest{
-		Path: "/bin/sh", Dir: "/bin", Args: []string{"-c", "printf ready"}, TotalTimeout: time.Minute,
-	}
-	if _, err := owner.Runner().Run(t.Context(), request); !errors.Is(err, worker.ErrRuntimeOwnership) {
-		t.Fatalf("run before recovery = %v", err)
-	}
-	if err := owner.Recover(t.Context()); err != nil {
-		t.Fatalf("Recover: %v", err)
-	}
-	result, err := owner.Runner().Run(t.Context(), request)
+	second, err := OpenIsolated(t.Context(), dir, "tui")
 	if err != nil {
-		t.Fatalf("run after recovery: %v", err)
+		t.Fatalf("second OpenIsolated: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := Close(context.Background(), second); err != nil {
+			t.Errorf("close second: %v", err)
+		}
+	})
+	if records := scopeRecords(t, filepath.Join(dir, "tui")); len(records) != 2 {
+		t.Fatalf("registry records = %v, want two distinct scopes", records)
+	}
+}
+
+func TestIsolatedScopeReclaimsAbandonedPeer(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "tui")
+
+	abandoned, err := OpenIsolated(t.Context(), dir, "tui")
+	if err != nil {
+		t.Fatalf("OpenIsolated: %v", err)
+	}
+	if err := Close(context.Background(), abandoned); err != nil {
+		t.Fatalf("close abandoned: %v", err)
+	}
+	if records := scopeRecords(t, root); len(records) != 1 {
+		t.Fatalf("registry records = %v, want the abandoned scope left behind", records)
+	}
+
+	owned, err := OpenIsolated(t.Context(), dir, "tui")
+	if err != nil {
+		t.Fatalf("OpenIsolated after abandonment: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := Close(context.Background(), owned); err != nil {
+			t.Errorf("close: %v", err)
+		}
+	})
+	if records := scopeRecords(t, root); len(records) != 1 {
+		t.Fatalf("registry records = %v, want only this scope's", records)
+	}
+}
+
+func TestOpenExcludesASecondScopeOnOneRecord(t *testing.T) {
+	dir := t.TempDir()
+	owned, err := Open(t.Context(), dir, "workers.db")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := Close(context.Background(), owned); err != nil {
+			t.Errorf("close: %v", err)
+		}
+	})
+	contendCtx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	if _, err := Open(contendCtx, dir, "workers.db"); !errors.Is(err, durable.ErrLockBusy) {
+		t.Fatalf("second Open = %v, want durable.ErrLockBusy", err)
+	}
+}
+
+func TestOpenAdmitsCommandsImmediately(t *testing.T) {
+	owned, err := Open(t.Context(), t.TempDir(), "workers.db")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := Close(context.Background(), owned); err != nil {
+			t.Errorf("close: %v", err)
+		}
+	})
+	runCtx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	result, err := owned.Run(runCtx, daemonkit.Cmd{
+		Path: "/bin/sh", Dir: "/bin", Args: []string{"-c", "printf ready"},
+		Exec: daemonkit.ServingSameUser(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
 	}
 	if string(result.Stdout) != "ready" {
 		t.Fatalf("stdout = %q", result.Stdout)

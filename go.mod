@@ -12,9 +12,9 @@ require (
 	github.com/mdp/qrterminal/v3 v3.2.1
 	github.com/shirou/gopsutil/v4 v4.26.5
 	github.com/spf13/cobra v1.10.2
-	github.com/yasyf/cc-interact v0.30.1
-	github.com/yasyf/daemonkit v0.19.1
-	github.com/yasyf/synckit v0.35.2
+	github.com/yasyf/cc-interact v0.32.1
+	github.com/yasyf/daemonkit v0.23.0
+	github.com/yasyf/synckit v0.38.0
 	golang.org/x/net v0.57.0
 	modernc.org/sqlite v1.52.0
 )

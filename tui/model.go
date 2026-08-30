@@ -3,15 +3,13 @@ package tui
 import (
 	"context"
 	"errors"
-	"os"
-	"syscall"
 	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/yasyf/cc-interact/daemon"
-	"github.com/yasyf/daemonkit/wire"
+	"github.com/yasyf/daemonkit"
 	"github.com/yasyf/synckit/hostregistry"
 
 	"github.com/yasyf/cc-runtime/interaction"
@@ -575,19 +573,15 @@ func (m Model) resolveCmd() tea.Cmd {
 	}
 }
 
+// transientDaemonSwap reports the daemon-unavailable window a version-skew swap
+// opens: no listener yet, one still starting, or the incumbent already leaving.
+// Each is daemonkit's own typed refusal, which provably never dispatched, so the
+// poll idles and retries instead of latching the fatal error screen. Every other
+// failure — an untrusted peer included — is a real error.
 func transientDaemonSwap(err error) bool {
-	var callErr *daemon.CallError
-	if !errors.As(err, &callErr) {
-		return false
-	}
-	switch callErr.Outcome {
-	case wire.Rejected, wire.PostSendFailure:
-		return true
-	case wire.PreSendFailure:
-		return errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ECONNREFUSED)
-	default:
-		return false
-	}
+	return errors.Is(err, daemonkit.ErrAbsent) ||
+		errors.Is(err, daemonkit.ErrNotReady) ||
+		errors.Is(err, daemonkit.ErrDraining)
 }
 
 // meshResolveCmd runs one mesh-wide resolve poll: ListAll fans interaction.list

@@ -9,8 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/yasyf/daemonkit/daemon"
-	"github.com/yasyf/daemonkit/proc"
+	"github.com/yasyf/daemonkit/durable"
 	"github.com/yasyf/synckit/hostregistry"
 
 	"github.com/yasyf/cc-runtime/interaction"
@@ -76,9 +75,9 @@ func routeStatePath() string {
 
 func withRouteLock(ctx context.Context, fn func(string) error) (err error) {
 	path := routeStatePath()
-	lock, err := (proc.FileLockSpec{
-		Path: path + ".lock", Mode: proc.FileLockExclusive, Deadline: routeLockDeadline,
-	}).Acquire(ctx)
+	lockCtx, cancel := context.WithTimeout(ctx, routeLockDeadline)
+	defer cancel()
+	lock, err := durable.AcquireLock(lockCtx, path+".lock")
 	if err != nil {
 		return fmt.Errorf("lock route state %s: %w", path, err)
 	}
@@ -115,7 +114,7 @@ func writeRouteState(path string, off bool) error {
 	if err != nil {
 		return fmt.Errorf("encode route state: %w", err)
 	}
-	if err := daemon.WriteFileDurable(path, data, 0o600); err != nil {
+	if err := durable.WriteFile(path, data, 0o600); err != nil {
 		return fmt.Errorf("write route state %s: %w", path, err)
 	}
 	return nil

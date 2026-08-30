@@ -10,7 +10,9 @@ import (
 func isolateState(t *testing.T) {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", "")
-	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("DAEMONKIT_HOME", dir)
 }
 
 func TestRouteStateExactV1RoundTrip(t *testing.T) {

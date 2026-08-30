@@ -2,14 +2,11 @@ package runtime
 
 import (
 	"context"
-	"os"
 
 	"github.com/yasyf/cc-interact/channel"
 	"github.com/yasyf/cc-interact/cmd"
 	"github.com/yasyf/cc-interact/daemon"
 	"github.com/yasyf/daemonkit/paths"
-	"github.com/yasyf/daemonkit/service"
-	"github.com/yasyf/daemonkit/trust"
 
 	"github.com/yasyf/cc-runtime/interaction"
 	"github.com/yasyf/cc-runtime/version"
@@ -17,54 +14,20 @@ import (
 
 func appPaths() paths.Paths { return interaction.AppPaths() }
 
-func daemonAgent() (service.Agent, error) {
-	executable, err := service.CanonicalExecutable()
-	if err != nil {
-		return service.Agent{}, err
-	}
-	return service.Agent{
-		Label: "com.yasyf.cc-runtime", Program: executable, Args: []string{"daemon"},
-		LogPath: appPaths().LogPath(), RestartPolicy: service.RestartOnFailure,
-	}, nil
-}
-
-func daemonRoles() daemon.Roles {
-	return daemon.Roles{
-		Business: trust.UnprotectedRole, Lifecycle: "com.yasyf.cc-runtime.lifecycle.v1",
-		StopControl: "com.yasyf.cc-runtime.stop.v1",
-	}
-}
-
-func daemonTrustPolicy() (trust.TrustPolicy, error) {
-	roles := daemonRoles()
-	requirement := trust.Requirement{TeamID: "SXKCTF23Q2", SigningIdentifier: "cc-runtime"}
-	return trust.NewTrustPolicy(trust.TrustPolicyConfig{
-		ExpectedUID: os.Geteuid(), AllowUnprotected: true,
-		Roles: map[trust.PeerRole]trust.Requirement{
-			roles.Lifecycle: requirement, roles.StopControl: requirement,
-		},
-		StopRoles: []trust.PeerRole{roles.StopControl}, ReceiptRoles: []trust.PeerRole{roles.Lifecycle},
-		ReadinessRoles: []trust.PeerRole{roles.Lifecycle},
-	})
-}
-
 func launcher() (daemon.Launcher, error) {
-	agent, err := daemonAgent()
+	spec, err := interaction.DaemonSpec()
 	if err != nil {
 		return daemon.Launcher{}, err
 	}
-	return daemon.Launcher{
-		Paths: appPaths(), WireBuild: daemon.WireBuild, RuntimeBuild: version.Version,
-		Agent: agent, Roles: daemonRoles(),
-	}, nil
+	return daemon.Launcher{Daemon: spec, Paths: appPaths(), RuntimeBuild: version.Version}, nil
 }
 
-func newClient(ctx context.Context) (*daemon.Client, error) {
+func newClient(context.Context) (*daemon.Client, error) {
 	launcher, err := launcher()
 	if err != nil {
 		return nil, err
 	}
-	return launcher.NewClient(ctx)
+	return launcher.NewClient()
 }
 
 func deps() cmd.Deps {

@@ -51,7 +51,7 @@ func seedPeer(t *testing.T, target string) {
 func isolateMesh(t *testing.T) {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", "")
-	t.Setenv("HOME", shortTempHome(t))
+	isolateHome(t)
 }
 
 // TestMeshRouteStatusNoPeers proves status reports routing off for want of peers,

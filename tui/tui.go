@@ -16,6 +16,7 @@ import (
 	"github.com/yasyf/cc-interact/cmd"
 	"github.com/yasyf/cc-interact/consume"
 	"github.com/yasyf/cc-interact/daemon"
+	"github.com/yasyf/daemonkit"
 
 	"github.com/yasyf/cc-runtime/interaction"
 	"github.com/yasyf/cc-runtime/internal/processowner"
@@ -25,8 +26,10 @@ import (
 // eventBuffer sizes the channel between the SSE consumer goroutine and the
 // Update loop, so a burst of events never blocks the stream reader.
 const (
-	eventBuffer      = 64
-	meshProcessLimit = 8
+	eventBuffer = 64
+	// tuiProcessRegistry holds one process scope per live TUI, so two windows
+	// own mesh commands at once instead of excluding each other.
+	tuiProcessRegistry = "tui-mesh-processes"
 )
 
 // TUICmd is the cc-runtime answer surface. It cold-starts the daemon, polls
@@ -75,7 +78,7 @@ func run(ctx context.Context, d cmd.Deps, scope string) (err error) {
 		return err
 	}
 	if processes != nil {
-		defer func() { err = errors.Join(err, processes.Close(ctx)) }()
+		defer func() { err = errors.Join(err, processowner.Close(ctx, processes)) }()
 	}
 
 	p := tea.NewProgram(model, tea.WithContext(ctx))
@@ -87,7 +90,7 @@ func run(ctx context.Context, d cmd.Deps, scope string) (err error) {
 // then fans interaction.list across every machine and a remote subject is
 // answered over ssh. With no peers the model keeps its untouched local-only path.
 // A corrupt registry fails loud rather than silently dropping the mesh.
-func wireMesh(ctx context.Context, stateDir string, model *Model) (*processowner.Owner, error) {
+func wireMesh(ctx context.Context, stateDir string, model *Model) (*daemonkit.Owned, error) {
 	if err := mesh.Initialize(ctx); err != nil {
 		return nil, err
 	}
@@ -98,14 +101,11 @@ func wireMesh(ctx context.Context, stateDir string, model *Model) (*processowner
 	if len(reg.Hosts) == 0 {
 		return nil, nil
 	}
-	processes, err := processowner.NewIsolated(ctx, stateDir, "tui-mesh-processes", meshProcessLimit)
+	processes, err := processowner.OpenIsolated(ctx, stateDir, tuiProcessRegistry)
 	if err != nil {
 		return nil, err
 	}
-	if err := processes.Recover(ctx); err != nil {
-		return nil, errors.Join(err, processes.Close(ctx))
-	}
-	runner := mesh.NewExecRunner(processes.Runner())
+	runner := mesh.NewExecRunner(processes)
 	model.reg = reg
 	model.local = runner
 	model.dial = func(string) mesh.Runner { return runner }

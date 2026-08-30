@@ -3,13 +3,12 @@ package tui
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
-	"syscall"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/yasyf/cc-interact/daemon"
-	"github.com/yasyf/daemonkit/wire"
+	"github.com/yasyf/daemonkit"
 
 	"github.com/yasyf/cc-runtime/interaction"
 )
@@ -80,11 +79,11 @@ func TestTransientDaemonSwap(t *testing.T) {
 		err  error
 		want bool
 	}{
-		{name: "rejected", err: &daemon.CallError{Outcome: wire.Rejected}, want: true},
-		{name: "post send failure", err: &daemon.CallError{Outcome: wire.PostSendFailure}, want: true},
-		{name: "missing socket", err: &daemon.CallError{Outcome: wire.PreSendFailure, Err: syscall.ENOENT}, want: true},
-		{name: "refused socket", err: &daemon.CallError{Outcome: wire.PreSendFailure, Err: syscall.ECONNREFUSED}, want: true},
-		{name: "other pre send failure", err: &daemon.CallError{Outcome: wire.PreSendFailure, Err: errors.New("bad frame")}},
+		{name: "no listener", err: daemonkit.ErrAbsent, want: true},
+		{name: "still starting", err: daemonkit.ErrNotReady, want: true},
+		{name: "already draining", err: daemonkit.ErrDraining, want: true},
+		{name: "wrapped no listener", err: fmt.Errorf("resolve: %w", daemonkit.ErrAbsent), want: true},
+		{name: "untrusted peer", err: daemonkit.ErrUntrusted},
 		{name: "ordinary error", err: errors.New("boom")},
 	}
 

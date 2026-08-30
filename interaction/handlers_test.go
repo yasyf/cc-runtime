@@ -11,82 +11,56 @@ import (
 	"time"
 
 	"github.com/yasyf/cc-interact/daemon"
-	dkdaemon "github.com/yasyf/daemonkit/daemon"
+	"github.com/yasyf/daemonkit"
 	"github.com/yasyf/daemonkit/paths"
-	"github.com/yasyf/daemonkit/trust"
-	"github.com/yasyf/daemonkit/wire"
 )
 
-// shortTempHome returns a short-pathed temp HOME so the daemon's unix socket
-// path stays under the macOS sun_path limit (~104 bytes), which t.TempDir()'s
-// long /var/folders path would blow past.
-func shortTempHome(t *testing.T) string {
+// isolateHome points HOME and daemonkit's own home override at one short-pathed
+// temp dir, so the daemon's unix socket stays under the macOS sun_path limit
+// (~104 bytes) that t.TempDir()'s long /var/folders path would blow past, and
+// nothing escapes into the developer's real home. daemonkit resolves the home
+// directory through the passwd database and ignores HOME, so both must be set.
+func isolateHome(t *testing.T) {
 	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "ccr")
 	if err != nil {
 		t.Fatalf("mkdir temp home: %v", err)
 	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	return filepath.Clean(dir)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	dir = filepath.Clean(dir)
+	t.Setenv("HOME", dir)
+	t.Setenv("DAEMONKIT_HOME", dir)
 }
 
-func testRoles() daemon.Roles {
-	return daemon.Roles{
-		Business: trust.UnprotectedRole, Lifecycle: "com.yasyf.cc-runtime.test.lifecycle.v1",
-		StopControl: "com.yasyf.cc-runtime.test.stop.v1",
-	}
-}
-
-func testTrustPolicy(t *testing.T) trust.TrustPolicy {
-	t.Helper()
-	roles := testRoles()
-	policy, err := trust.NewTrustPolicy(trust.TrustPolicyConfig{
-		ExpectedUID: os.Geteuid(), AllowUnprotected: true,
-		Roles: map[trust.PeerRole]trust.Requirement{
-			roles.Lifecycle:   {TeamID: "TESTTEAM", SigningIdentifier: "com.yasyf.cc-runtime.test.lifecycle"},
-			roles.StopControl: {TeamID: "TESTTEAM", SigningIdentifier: "com.yasyf.cc-runtime.test.stop"},
-		},
-		StopRoles: []trust.PeerRole{roles.StopControl}, ReceiptRoles: []trust.PeerRole{roles.Lifecycle},
-		ReadinessRoles: []trust.PeerRole{roles.Lifecycle},
+// testServeSpec is the harness daemon's identity: served in process, so it
+// states no Program and takes the same-user serving posture the test client
+// attaches under.
+func testServeSpec() daemonkit.Daemon {
+	return daemon.Spec(daemonkit.Daemon{
+		Label: "ccr-handlers-test",
+		Trust: daemonkit.Trust{Serving: daemonkit.ServingSameUser()},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return policy
 }
 
-func waitReadyClient(t *testing.T, p paths.Paths, runtimeBuild string) *daemon.Client {
+// awaitBusiness polls the business lane until the served daemon dispatches,
+// returning a connected client.
+func awaitBusiness(t *testing.T, spec daemonkit.Daemon) *daemon.Client {
 	t.Helper()
+	client, err := daemon.NewClient(spec)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
 	deadline := time.Now().Add(5 * time.Second)
-	var (
-		client *daemon.Client
-		health daemon.RuntimeHealth
-		err    error
-	)
 	for {
-		if client == nil {
-			client, err = daemon.NewClient(context.Background(), daemon.ClientConfig{
-				Socket: p.SocketPath(), WireBuild: daemon.WireBuild, Role: trust.UnprotectedRole,
-			})
-		}
-		if err == nil {
-			health, err = client.RuntimeHealth(context.Background())
-			if err == nil && health.RuntimeBuild == runtimeBuild &&
-				health.RuntimeProtocol == int(wire.ProtocolVersion) && health.ProcessGeneration != "" &&
-				health.Ready && health.State == dkdaemon.StateHealthy && !health.Draining {
-				t.Cleanup(func() { _ = client.Close() })
-				return client
-			}
-			if err != nil {
-				_ = client.Close()
-				client = nil
-			}
+		probeCtx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+		reply, err := client.Do(probeCtx, daemon.Envelope{Op: daemon.OpStatus, Scope: testScope})
+		cancel()
+		if err == nil && reply.OK {
+			return client
 		}
 		if time.Now().After(deadline) {
-			if client != nil {
-				_ = client.Close()
-			}
-			t.Fatalf("daemon readiness: health=%+v err=%v", health, err)
+			t.Fatalf("daemon readiness: reply=%+v err=%v", reply, err)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -162,16 +136,15 @@ type harness struct {
 
 func newHarness(t *testing.T, tweaks ...func(*daemon.Config)) *harness {
 	t.Helper()
-	t.Setenv("HOME", shortTempHome(t))
+	isolateHome(t)
 	p := paths.Paths{App: ".ccr"}
 
+	spec := testServeSpec()
 	cfg := daemon.Config{
 		AppName:         "cc-runtime-test",
 		Paths:           p,
-		WireBuild:       daemon.WireBuild,
+		Daemon:          spec,
 		RuntimeBuild:    "v0.0.0-test",
-		TrustPolicy:     testTrustPolicy(t),
-		Roles:           testRoles(),
 		ActiveStatuses:  ActiveStatuses,
 		Gate:            Gate(),
 		GateErrorReason: GateErrorReason,
@@ -203,7 +176,7 @@ func newHarness(t *testing.T, tweaks ...func(*daemon.Config)) *harness {
 		}
 	})
 
-	client := waitReadyClient(t, p, cfg.RuntimeBuild)
+	client := awaitBusiness(t, spec)
 	return &harness{t: t, client: client, paths: p, fanout: fanout, server: s}
 }
 
