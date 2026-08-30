@@ -6,6 +6,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Pin daemonkit v0.23.0, cc-interact v0.32.1, and synckit v0.38.0, and migrate
+  onto daemonkit's consolidated surface. The `daemon`, `proc`, `service`,
+  `trust`, `wire`, and `worker` packages are gone: their successors are the
+  root `daemonkit` package plus `durable`, and `paths` is unchanged.
+- Declare the daemon once as `interaction.DaemonSpec`, a `daemonkit.Daemon`
+  the launcher, the daemon, and every client read. It replaces the separate
+  `service.Agent`, `daemon.Roles`, and `trust.TrustPolicy` declarations, whose
+  three copies of the same identity could disagree. The control lane still pins
+  the Developer ID cc-runtime is released under; the serving posture is the
+  same-user waiver, because a dev build is unsigned.
+- Open clients from that identity rather than a socket path. The endpoint now
+  derives from the label, so `daemon.ClientConfig{Socket: ...}` is gone and
+  nothing spells the path.
+- Rebuild `internal/processowner` on `daemonkit.OwnProcesses`, which folds in
+  the exclusive lock, the owner generation, prior-generation reclaim, and
+  settlement that the package hand-rolled over `proc.Reaper` and `worker.Pool`.
+  A scope's liveness is now the exclusive lock its owner holds rather than a
+  recorded pid probed against the process table, so the JSON owner records and
+  their schema go with it. The per-owner concurrency cap has no successor:
+  daemonkit bounds a command by its context deadline and `Cmd.MaxOutput`
+  instead of by pool capacity.
+- Publish route state and VAPID keys through `durable.WriteFile`, and take the
+  route lock through `durable.AcquireLock`.
+- Read the transient daemon-swap window off daemonkit's typed refusals
+  (`ErrAbsent`, `ErrNotReady`, `ErrDraining`) instead of the wire outcome enum,
+  so the TUI's resolve poll idles across a version-skew swap and an untrusted
+  peer is no longer retried as if it were one.
+
+### Removed
+
+- The out-of-process trust-verifier child dispatch from `main` and from the two
+  `TestMain` hooks that existed only to serve it. daemonkit verifies a peer's
+  code identity in process, so there is no child to hand argv to.
+
+### Fixed
+
+- Isolate `DAEMONKIT_HOME` alongside `HOME` in every test that redirects the
+  home directory. daemonkit resolves the home directory through the passwd
+  database and ignores `HOME`, so the mesh and TUI suites were reading and
+  writing the developer's real `~/.cc-runtime`.
+- Run CI on macOS. daemonkit is macOS-only and does not compile off darwin, so
+  the Linux runner could no longer build the module at all.
+
 ## [0.17.3] - 2026-07-24
 
 ### Changed
