@@ -37,7 +37,7 @@ func TestRPCAllowedOpRoundTrips(t *testing.T) {
 	e := newE2E(t)
 	subjectID := e.start()
 
-	out, err := runRPC(t, `{"scope":"`+e2eScope+`"}`, "interaction.list", "--json", "-")
+	out, err := runRPC(t, `{"scope":"`+e2eScope()+`"}`, "interaction.list", "--json", "-")
 	if err != nil {
 		t.Fatalf("rpc interaction.list: %v\n%s", err, out)
 	}
@@ -101,7 +101,7 @@ func TestRPCSessionKeysDistinctSubjects(t *testing.T) {
 	notify := func(session string) string {
 		t.Helper()
 		out, err := runRPC(t, `{"message":"needs you"}`, string(interaction.OpNotify),
-			"--cwd", e2eScope, "--session", session, "--json", "-")
+			"--cwd", e2eScope(), "--session", session, "--json", "-")
 		if err != nil {
 			t.Fatalf("rpc notify (%s): %v\n%s", session, err, out)
 		}
@@ -134,7 +134,7 @@ func TestRPCJSONFromStdin(t *testing.T) {
 	e := newE2E(t)
 	subjectID := e.start()
 
-	out, err := runRPC(t, `{"scope":"`+e2eScope+`"}`, "interaction.list", "--json", "-")
+	out, err := runRPC(t, `{"scope":"`+e2eScope()+`"}`, "interaction.list", "--json", "-")
 	if err != nil {
 		t.Fatalf("rpc --json -: %v\n%s", err, out)
 	}

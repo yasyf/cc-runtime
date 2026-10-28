@@ -6,6 +6,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Any process running as the same user can now connect to the daemon; peer
+  signatures and spawned commands are no longer verified. Development rebuilds
+  use the executable's modification time as their build version instead of
+  hashing the executable, so commands can recognize and replace an older build.
+- Builds against daemonkit 0.35.1, cc-interact 0.39.0, and synckit 0.47.0 with Go 1.26.10.
+- Edit gates follow the edited file's directory instead of the hook's working
+  directory, so an open question allows edits in other scopes.
+
 ## [0.18.0] - 2026-08-30
 
 ### Changed

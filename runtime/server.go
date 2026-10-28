@@ -17,7 +17,6 @@ import (
 	"github.com/yasyf/cc-runtime/internal/processowner"
 	"github.com/yasyf/cc-runtime/internal/web"
 	"github.com/yasyf/cc-runtime/mesh"
-	"github.com/yasyf/cc-runtime/version"
 )
 
 // daemonProcessStore records the daemon's owned mesh processes, so a crash
@@ -30,7 +29,7 @@ const daemonProcessStore = "daemon-mesh-processes.db"
 // tokenless mesh trust when the shared synckit mesh state exists, and the
 // push lanes — Web Push always, direct APNs when configured — feeding every
 // question/notification append.
-func buildServer(ctx context.Context, spec daemonkit.Daemon, processes *daemonkit.Owned) (*daemon.Server, error) {
+func buildServer(ctx context.Context, build string, spec daemonkit.Daemon, processes *daemonkit.Owned) (*daemon.Server, error) {
 	if err := mesh.Initialize(ctx); err != nil {
 		return nil, err
 	}
@@ -57,7 +56,7 @@ func buildServer(ctx context.Context, spec daemonkit.Daemon, processes *daemonki
 		AppName:           interaction.AppName,
 		Paths:             interaction.AppPaths(),
 		Daemon:            spec,
-		RuntimeBuild:      version.Version,
+		RuntimeBuild:      build,
 		ActiveStatuses:    interaction.ActiveStatuses,
 		Gate:              interaction.Gate(),
 		GateErrorReason:   interaction.GateErrorReason,
@@ -137,8 +136,8 @@ func buildServer(ctx context.Context, spec daemonkit.Daemon, processes *daemonki
 	return s, nil
 }
 
-func serve(ctx context.Context) (err error) {
-	spec, err := interaction.DaemonSpec()
+func serve(ctx context.Context, build string) (err error) {
+	spec, err := interaction.DaemonSpec(build)
 	if err != nil {
 		return err
 	}
@@ -147,7 +146,7 @@ func serve(ctx context.Context) (err error) {
 		return err
 	}
 	defer func() { err = errors.Join(err, processowner.Close(ctx, processes)) }()
-	s, err := buildServer(ctx, spec, processes)
+	s, err := buildServer(ctx, build, spec, processes)
 	if err != nil {
 		return err
 	}

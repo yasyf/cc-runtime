@@ -32,14 +32,14 @@ func isolateHome(t *testing.T) {
 	t.Setenv("DAEMONKIT_HOME", dir)
 }
 
-// testServeSpec is the harness daemon's identity: served in process, so it
-// states no Program and takes the same-user serving posture the test client
-// attaches under.
-func testServeSpec() daemonkit.Daemon {
-	return daemon.Spec(daemonkit.Daemon{
-		Label: "ccr-handlers-test",
-		Trust: daemonkit.Trust{Serving: daemonkit.ServingSameUser()},
-	})
+func testServeSpec(t *testing.T) daemonkit.Daemon {
+	t.Helper()
+	spec, err := DaemonSpec("test")
+	if err != nil {
+		t.Fatalf("DaemonSpec: %v", err)
+	}
+	spec.Label = "ccr-handlers-test"
+	return spec
 }
 
 // awaitBusiness polls the business lane until the served daemon dispatches,
@@ -54,7 +54,7 @@ func awaitBusiness(t *testing.T, spec daemonkit.Daemon) *daemon.Client {
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		probeCtx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
-		reply, err := client.Do(probeCtx, daemon.Envelope{Op: daemon.OpStatus, Scope: testScope})
+		reply, err := client.Do(probeCtx, daemon.Envelope{Op: daemon.OpStatus, Scope: testScope()})
 		cancel()
 		if err == nil && reply.OK {
 			return client
@@ -69,8 +69,9 @@ func awaitBusiness(t *testing.T, spec daemonkit.Daemon) *daemon.Client {
 const (
 	testSession = "sess-1"
 	testPID     = 4242
-	testScope   = "/scope/a"
 )
+
+func testScope() string { return os.Getenv("HOME") }
 
 // recordingFanout captures every fan-out hook invocation for assertions.
 type recordingFanout struct {
@@ -139,7 +140,7 @@ func newHarness(t *testing.T, tweaks ...func(*daemon.Config)) *harness {
 	isolateHome(t)
 	p := paths.Paths{App: ".ccr"}
 
-	spec := testServeSpec()
+	spec := testServeSpec(t)
 	cfg := daemon.Config{
 		AppName:         "cc-runtime-test",
 		Paths:           p,
@@ -199,7 +200,7 @@ func (h *harness) agentEnv(op daemon.Op, body any) daemon.Envelope {
 		}
 		raw = b
 	}
-	return daemon.Envelope{Op: op, Session: testSession, ClaudePID: testPID, Scope: testScope, Body: raw}
+	return daemon.Envelope{Op: op, Session: testSession, ClaudePID: testPID, Scope: testScope(), Body: raw}
 }
 
 func (h *harness) start() string {
@@ -227,7 +228,7 @@ func (h *harness) ask(q QuestionPayload) (string, int64) {
 func (h *harness) answer(subjectID string, questionID int64) bool {
 	h.t.Helper()
 	body, _ := json.Marshal(AnswerPayload{SubjectID: subjectID, QuestionID: questionID, Selected: []string{"yes"}})
-	r := h.do(daemon.Envelope{Op: OpAnswer, Scope: testScope, Body: body})
+	r := h.do(daemon.Envelope{Op: OpAnswer, Scope: testScope(), Body: body})
 	if !r.OK {
 		h.t.Fatalf("answer: %s", r.Error)
 	}
@@ -250,7 +251,7 @@ func (h *harness) status(subjectID string) string {
 // queryRow reads a subject's status through the list op, the only read surface
 // the package exposes over the socket.
 func (h *harness) queryRow(subjectID string, dst *string) error {
-	r := h.do(daemon.Envelope{Op: OpList, Scope: testScope})
+	r := h.do(daemon.Envelope{Op: OpList, Scope: testScope()})
 	var reply listReply
 	if err := json.Unmarshal(r.Body, &reply); err != nil {
 		return err
@@ -267,8 +268,8 @@ func (h *harness) queryRow(subjectID string, dst *string) error {
 
 func (h *harness) gateAllows() bool {
 	h.t.Helper()
-	body, _ := json.Marshal(map[string]any{"tool_name": "Edit", "tool_input": json.RawMessage(`{"file_path":"x.go"}`)})
-	r := h.do(daemon.Envelope{Op: daemon.OpGuardEdit, Session: testSession, ClaudePID: testPID, Scope: testScope, Body: body})
+	body, _ := json.Marshal(map[string]any{"tool_name": "Edit", "tool_input": map[string]string{"file_path": filepath.Join(testScope(), "x.go")}})
+	r := h.do(daemon.Envelope{Op: daemon.OpGuardEdit, Session: testSession, ClaudePID: testPID, Scope: testScope(), Body: body})
 	if !r.OK {
 		h.t.Fatalf("guard-edit: %s", r.Error)
 	}
@@ -298,13 +299,41 @@ func TestHandleAskAppendsAwaitsAndProjects(t *testing.T) {
 	}
 
 	pendBody, _ := json.Marshal(subjectBody{SubjectID: subjectID})
-	r := h.do(daemon.Envelope{Op: OpPending, Scope: testScope, Body: pendBody})
+	r := h.do(daemon.Envelope{Op: OpPending, Scope: testScope(), Body: pendBody})
 	var pend pendingReply
 	if err := json.Unmarshal(r.Body, &pend); err != nil {
 		t.Fatalf("unmarshal pending: %v", err)
 	}
 	if len(pend.Questions) != 1 || pend.Questions[0].QuestionID != questionID || pend.Questions[0].Header != "deploy?" {
 		t.Fatalf("pending = %+v, want one question id %d header deploy?", pend.Questions, questionID)
+	}
+}
+
+func TestGuardEditUsesEditedFileScope(t *testing.T) {
+	h := newHarness(t)
+	h.ask(sampleQuestion("deploy?"))
+	otherScope := t.TempDir()
+	for _, tc := range []struct {
+		name      string
+		tool      string
+		scope     string
+		input     map[string]string
+		wantAllow bool
+	}{
+		{"edit inside scope", "Edit", testScope(), map[string]string{"file_path": filepath.Join(testScope(), "x.go")}, false},
+		{"write into new directories", "Write", testScope(), map[string]string{"file_path": filepath.Join(testScope(), "new", "deep", "x.go")}, false},
+		{"notebook inside scope", "NotebookEdit", testScope(), map[string]string{"notebook_path": filepath.Join(testScope(), "n.ipynb")}, false},
+		{"edit inside scope from another cwd", "Edit", otherScope, map[string]string{"file_path": filepath.Join(testScope(), "x.go")}, false},
+		{"edit outside scope", "Edit", testScope(), map[string]string{"file_path": filepath.Join(otherScope, "x.go")}, true},
+		{"no file uses envelope scope", "Edit", testScope(), map[string]string{}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body, _ := json.Marshal(map[string]any{"tool_name": tc.tool, "tool_input": tc.input})
+			r := h.do(daemon.Envelope{Op: daemon.OpGuardEdit, Session: testSession, ClaudePID: testPID, Scope: tc.scope, Body: body})
+			if !r.OK || r.Allow != tc.wantAllow || (r.Reason == "") != tc.wantAllow {
+				t.Fatalf("guard-edit = %+v, want allow=%t with a reason only when blocked", r, tc.wantAllow)
+			}
+		})
 	}
 }
 
@@ -425,7 +454,7 @@ func TestConcurrentAnswerRaceIdlesExactlyOnce(t *testing.T) {
 		go func(qid int64) {
 			defer wg.Done()
 			body, _ := json.Marshal(AnswerPayload{SubjectID: subjectID, QuestionID: qid, Selected: []string{"yes"}})
-			r, err := h.client.Do(context.Background(), daemon.Envelope{Op: OpAnswer, Scope: testScope, Body: body})
+			r, err := h.client.Do(context.Background(), daemon.Envelope{Op: OpAnswer, Scope: testScope(), Body: body})
 			if err != nil {
 				t.Errorf("concurrent answer: %v", err)
 				return
@@ -457,7 +486,7 @@ func TestHandleAnswerPollReportsAnswer(t *testing.T) {
 	subjectID, questionID := h.ask(sampleQuestion("color?"))
 
 	pollBodyJSON, _ := json.Marshal(pollBody{SubjectID: subjectID, QuestionID: questionID})
-	r := h.do(daemon.Envelope{Op: OpAnswerPoll, Scope: testScope, Body: pollBodyJSON})
+	r := h.do(daemon.Envelope{Op: OpAnswerPoll, Scope: testScope(), Body: pollBodyJSON})
 	var before pollReply
 	if err := json.Unmarshal(r.Body, &before); err != nil {
 		t.Fatalf("unmarshal poll before: %v", err)
@@ -468,7 +497,7 @@ func TestHandleAnswerPollReportsAnswer(t *testing.T) {
 
 	h.answer(subjectID, questionID)
 
-	r = h.do(daemon.Envelope{Op: OpAnswerPoll, Scope: testScope, Body: pollBodyJSON})
+	r = h.do(daemon.Envelope{Op: OpAnswerPoll, Scope: testScope(), Body: pollBodyJSON})
 	var after pollReply
 	if err := json.Unmarshal(r.Body, &after); err != nil {
 		t.Fatalf("unmarshal poll after: %v", err)
@@ -596,7 +625,7 @@ func TestHandleListReturnsAwaitingSubjectWithPendingCount(t *testing.T) {
 	subjectID, _ := h.ask(sampleQuestion("q1"))
 	h.ask(sampleQuestion("q2"))
 
-	r := h.do(daemon.Envelope{Op: OpList, Scope: testScope})
+	r := h.do(daemon.Envelope{Op: OpList, Scope: testScope()})
 	var reply listReply
 	if err := json.Unmarshal(r.Body, &reply); err != nil {
 		t.Fatalf("unmarshal list: %v", err)

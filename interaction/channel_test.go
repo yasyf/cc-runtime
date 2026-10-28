@@ -29,7 +29,7 @@ type channelHarness struct {
 func newChannelHarness(t *testing.T) *channelHarness {
 	t.Helper()
 	isolateHome(t)
-	spec, err := DaemonSpec()
+	spec, err := DaemonSpec("test")
 	if err != nil {
 		t.Fatalf("DaemonSpec: %v", err)
 	}
@@ -63,7 +63,7 @@ func newChannelHarness(t *testing.T) *channelHarness {
 
 	client := awaitBusiness(t, spec)
 
-	r, err := client.Do(context.Background(), daemon.Envelope{Op: OpList, Scope: testScope})
+	r, err := client.Do(context.Background(), daemon.Envelope{Op: OpList, Scope: testScope()})
 	if err != nil {
 		t.Fatalf("list for http port: %v", err)
 	}
@@ -76,7 +76,7 @@ func newChannelHarness(t *testing.T) *channelHarness {
 
 func askTool(t *testing.T, session string, pid int) channel.Tool {
 	t.Helper()
-	tools, method, instructions, err := ChannelTools(context.Background(), session, testScope, pid)
+	tools, method, instructions, err := ChannelTools(context.Background(), "test", session, testScope(), pid)
 	if err != nil {
 		t.Fatalf("ChannelTools: %v", err)
 	}
@@ -99,7 +99,7 @@ func submitAnswerFor(t *testing.T, client *daemon.Client, selected ...string) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		r, err := client.Do(context.Background(), daemon.Envelope{Op: OpList, Scope: testScope})
+		r, err := client.Do(context.Background(), daemon.Envelope{Op: OpList, Scope: testScope()})
 		if err != nil {
 			t.Errorf("list awaiting: %v", err)
 			return
@@ -114,7 +114,7 @@ func submitAnswerFor(t *testing.T, client *daemon.Client, selected ...string) {
 				continue
 			}
 			pb, _ := json.Marshal(subjectBody{SubjectID: s.SubjectID})
-			pr := mustDo(t, client, daemon.Envelope{Op: OpPending, Scope: testScope, Body: pb})
+			pr := mustDo(t, client, daemon.Envelope{Op: OpPending, Scope: testScope(), Body: pb})
 			var pend pendingReply
 			if err := json.Unmarshal(pr.Body, &pend); err != nil {
 				t.Errorf("unmarshal pending: %v", err)
@@ -124,7 +124,7 @@ func submitAnswerFor(t *testing.T, client *daemon.Client, selected ...string) {
 				continue
 			}
 			ab, _ := json.Marshal(AnswerPayload{SubjectID: s.SubjectID, QuestionID: pend.Questions[0].QuestionID, Selected: selected})
-			mustDo(t, client, daemon.Envelope{Op: OpAnswer, Scope: testScope, Body: ab})
+			mustDo(t, client, daemon.Envelope{Op: OpAnswer, Scope: testScope(), Body: ab})
 			return
 		}
 		if time.Now().After(deadline) {
@@ -198,13 +198,13 @@ func TestAskToolDegradesToPendingWithoutError(t *testing.T) {
 
 	// Drive a question directly so the inline long-poll has a target, then let an
 	// injected budget expire with no answer ever arriving.
-	r := mustDo(t, h.client, daemon.Envelope{Op: OpAsk, Session: testSession, ClaudePID: testPID, Scope: testScope, Body: sampleArgs(t)})
+	r := mustDo(t, h.client, daemon.Envelope{Op: OpAsk, Session: testSession, ClaudePID: testPID, Scope: testScope(), Body: sampleArgs(t)})
 	var ar askReply
 	if err := json.Unmarshal(r.Body, &ar); err != nil {
 		t.Fatalf("unmarshal ask reply: %v", err)
 	}
 
-	text, err := awaitAnswer(context.Background(), h.client, testSession, testScope, testPID,
+	text, err := awaitAnswer(context.Background(), h.client, testSession, testScope(), testPID,
 		pollBody{SubjectID: ar.SubjectID, QuestionID: ar.QuestionID}, 50*time.Millisecond)
 	if err != nil {
 		t.Fatalf("awaitAnswer errored on budget expiry: %v", err)
@@ -217,7 +217,7 @@ func TestAskToolDegradesToPendingWithoutError(t *testing.T) {
 func TestHumanAnswerNotSuppressedByExcludeAgentOrigin(t *testing.T) {
 	h := newChannelHarness(t)
 
-	r := mustDo(t, h.client, daemon.Envelope{Op: OpAsk, Session: testSession, ClaudePID: testPID, Scope: testScope, Body: sampleArgs(t)})
+	r := mustDo(t, h.client, daemon.Envelope{Op: OpAsk, Session: testSession, ClaudePID: testPID, Scope: testScope(), Body: sampleArgs(t)})
 	var ar askReply
 	if err := json.Unmarshal(r.Body, &ar); err != nil {
 		t.Fatalf("unmarshal ask reply: %v", err)
@@ -248,7 +248,7 @@ func TestHumanAnswerNotSuppressedByExcludeAgentOrigin(t *testing.T) {
 	}()
 
 	ab, _ := json.Marshal(AnswerPayload{SubjectID: ar.SubjectID, QuestionID: ar.QuestionID, Selected: []string{"hold"}})
-	mustDo(t, h.client, daemon.Envelope{Op: OpAnswer, Scope: testScope, Body: ab})
+	mustDo(t, h.client, daemon.Envelope{Op: OpAnswer, Scope: testScope(), Body: ab})
 
 	select {
 	case data := <-gotAnswer:
@@ -316,7 +316,7 @@ func TestAskToolSubjectKeyedToClaudePID(t *testing.T) {
 		ask.Handler(context.Background(), sampleArgs(t), func(string) {})
 	}()
 
-	subjectID := awaitingSubjectID(t, h.client, testScope)
+	subjectID := awaitingSubjectID(t, h.client, testScope())
 	if got := subjectClaudePID(t, subjectID); got != claudePID {
 		t.Fatalf("subject %s claude_pid = %d, want the passed-in claude window pid %d (not the channel server's getpid)", subjectID, got, claudePID)
 	}
@@ -442,7 +442,7 @@ func TestFreshWindowDoesNotInheritDeadOwnersAwaitingSubject(t *testing.T) {
 // one window in a non-default scope.
 func askToolFor(t *testing.T, session string, pid int, scope string) channel.Tool {
 	t.Helper()
-	tools, _, _, err := ChannelTools(context.Background(), session, scope, pid)
+	tools, _, _, err := ChannelTools(context.Background(), "test", session, scope, pid)
 	if err != nil {
 		t.Fatalf("ChannelTools: %v", err)
 	}

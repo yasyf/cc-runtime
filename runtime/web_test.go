@@ -80,8 +80,8 @@ func TestHTTPPlaneServesSPAAndInteractionREST(t *testing.T) {
 		t.Fatalf("sessions = %+v, want the one awaiting subject", sessions.Subjects)
 	}
 	got := sessions.Subjects[0]
-	if got.SubjectID != subjectID || got.Scope != e2eScope || got.Status != interaction.StatusAwaiting || got.Pending != 1 {
-		t.Fatalf("session = %+v, want %s %s awaiting pending 1", got, subjectID, e2eScope)
+	if got.SubjectID != subjectID || got.Scope != e2eScope() || got.Status != interaction.StatusAwaiting || got.Pending != 1 {
+		t.Fatalf("session = %+v, want %s %s awaiting pending 1", got, subjectID, e2eScope())
 	}
 
 	answer, _ := json.Marshal(interaction.AnswerPayload{QuestionID: questionID, Selected: []string{"yes"}})

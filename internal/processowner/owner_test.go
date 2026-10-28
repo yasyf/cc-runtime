@@ -114,7 +114,6 @@ func TestOpenAdmitsCommandsImmediately(t *testing.T) {
 	defer cancel()
 	result, err := owned.Run(runCtx, daemonkit.Cmd{
 		Path: "/bin/sh", Dir: "/bin", Args: []string{"-c", "printf ready"},
-		Exec: daemonkit.ServingSameUser(),
 	})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
