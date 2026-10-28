@@ -58,7 +58,7 @@ func (r execRunner) run(ctx context.Context, stdin []byte, path string, args []s
 	defer cancel()
 	result, err := r.runner.Run(runCtx, daemonkit.Cmd{
 		Path: path, Dir: filepath.Dir(path), Args: args, Stdin: stdin,
-		Exec: daemonkit.ServingSameUser(), MaxOutput: runnerOutputLimit,
+		MaxOutput: runnerOutputLimit,
 	})
 	if err != nil {
 		return string(result.Stdout), fmt.Errorf("%s: %w: %s", label, err, strings.TrimSpace(string(result.Stderr)))

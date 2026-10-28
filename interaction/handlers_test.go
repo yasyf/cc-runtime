@@ -32,14 +32,14 @@ func isolateHome(t *testing.T) {
 	t.Setenv("DAEMONKIT_HOME", dir)
 }
 
-// testServeSpec is the harness daemon's identity: served in process, so it
-// states no Program and takes the same-user serving posture the test client
-// attaches under.
-func testServeSpec() daemonkit.Daemon {
-	return daemon.Spec(daemonkit.Daemon{
-		Label: "ccr-handlers-test",
-		Trust: daemonkit.Trust{Serving: daemonkit.ServingSameUser()},
-	})
+func testServeSpec(t *testing.T) daemonkit.Daemon {
+	t.Helper()
+	spec, err := DaemonSpec("test")
+	if err != nil {
+		t.Fatalf("DaemonSpec: %v", err)
+	}
+	spec.Label = "ccr-handlers-test"
+	return spec
 }
 
 // awaitBusiness polls the business lane until the served daemon dispatches,
@@ -139,7 +139,7 @@ func newHarness(t *testing.T, tweaks ...func(*daemon.Config)) *harness {
 	isolateHome(t)
 	p := paths.Paths{App: ".ccr"}
 
-	spec := testServeSpec()
+	spec := testServeSpec(t)
 	cfg := daemon.Config{
 		AppName:         "cc-runtime-test",
 		Paths:           p,

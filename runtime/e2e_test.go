@@ -16,7 +16,6 @@ import (
 	"github.com/yasyf/cc-runtime/access"
 	"github.com/yasyf/cc-runtime/interaction"
 	"github.com/yasyf/cc-runtime/internal/processowner"
-	"github.com/yasyf/cc-runtime/version"
 )
 
 const (
@@ -59,7 +58,7 @@ func isolateHome(t *testing.T) {
 // test's temp home.
 func testServeSpec(t *testing.T) daemonkit.Daemon {
 	t.Helper()
-	spec, err := interaction.DaemonSpec()
+	spec, err := interaction.DaemonSpec("test")
 	if err != nil {
 		t.Fatalf("DaemonSpec: %v", err)
 	}
@@ -95,7 +94,7 @@ func newE2E(t *testing.T) *e2e {
 	isolateHome(t)
 	spec := testServeSpec(t)
 	testLauncher := daemon.Launcher{
-		Daemon: spec, Paths: interaction.AppPaths(), RuntimeBuild: version.Version,
+		Daemon: spec, Paths: interaction.AppPaths(), RuntimeBuild: "test",
 	}
 	accessState := access.Store{Dir: interaction.AppPaths().StateDir()}
 	if err := accessState.WriteConfig(access.Config{Bind: access.BindLoopback}); err != nil {
@@ -114,7 +113,7 @@ func newE2E(t *testing.T) *e2e {
 			t.Errorf("close process owner: %v", err)
 		}
 	})
-	s, err := buildServer(t.Context(), spec, processes)
+	s, err := buildServer(t.Context(), "test", spec, processes)
 	if err != nil {
 		t.Fatalf("buildServer: %v", err)
 	}

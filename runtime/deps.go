@@ -7,6 +7,7 @@ import (
 	"github.com/yasyf/cc-interact/cmd"
 	"github.com/yasyf/cc-interact/daemon"
 	"github.com/yasyf/daemonkit/paths"
+	daemonversion "github.com/yasyf/daemonkit/version"
 
 	"github.com/yasyf/cc-runtime/interaction"
 	"github.com/yasyf/cc-runtime/version"
@@ -14,16 +15,16 @@ import (
 
 func appPaths() paths.Paths { return interaction.AppPaths() }
 
-func launcher() (daemon.Launcher, error) {
-	spec, err := interaction.DaemonSpec()
+func launcher(build string) (daemon.Launcher, error) {
+	spec, err := interaction.DaemonSpec(build)
 	if err != nil {
 		return daemon.Launcher{}, err
 	}
-	return daemon.Launcher{Daemon: spec, Paths: appPaths(), RuntimeBuild: version.Version}, nil
+	return daemon.Launcher{Daemon: spec, Paths: appPaths(), RuntimeBuild: build}, nil
 }
 
-func newClient(context.Context) (*daemon.Client, error) {
-	launcher, err := launcher()
+func newClient(build string) (*daemon.Client, error) {
+	launcher, err := launcher(build)
 	if err != nil {
 		return nil, err
 	}
@@ -31,26 +32,27 @@ func newClient(context.Context) (*daemon.Client, error) {
 }
 
 func deps() cmd.Deps {
+	build := daemonversion.Running(version.Version)
 	return cmd.Deps{
 		Paths:     appPaths(),
-		Version:   version.Version,
-		NewClient: newClient,
+		Version:   build,
+		NewClient: func(context.Context) (*daemon.Client, error) { return newClient(build) },
 		EnsureCurrent: func(ctx context.Context) error {
-			launcher, err := launcher()
+			launcher, err := launcher(build)
 			if err != nil {
 				return err
 			}
 			return launcher.EnsureCurrent(ctx, daemon.UpgradeTimeout)
 		},
 		EnsureCurrentIfRunning: func(ctx context.Context) error {
-			launcher, err := launcher()
+			launcher, err := launcher(build)
 			if err != nil {
 				return err
 			}
 			return launcher.EnsureCurrentIfRunning(ctx)
 		},
 		Stop: func(ctx context.Context) error {
-			launcher, err := launcher()
+			launcher, err := launcher(build)
 			if err != nil {
 				return err
 			}
@@ -59,9 +61,9 @@ func deps() cmd.Deps {
 		ClaudePID:     claudePID,
 		WindowAlive:   live,
 		TerminalEvent: func(string) bool { return false },
-		Serve:         serve,
+		Serve:         func(ctx context.Context) error { return serve(ctx, build) },
 		ChannelTools: func(ctx context.Context, session, scope string) ([]channel.Tool, string, string, error) {
-			return interaction.ChannelTools(ctx, session, scope, claudePID())
+			return interaction.ChannelTools(ctx, build, session, scope, claudePID())
 		},
 	}
 }

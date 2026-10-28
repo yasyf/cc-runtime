@@ -577,7 +577,7 @@ func (m Model) resolveCmd() tea.Cmd {
 // opens: no listener yet, one still starting, or the incumbent already leaving.
 // Each is daemonkit's own typed refusal, which provably never dispatched, so the
 // poll idles and retries instead of latching the fatal error screen. Every other
-// failure — an untrusted peer included — is a real error.
+// failure is a real error.
 func transientDaemonSwap(err error) bool {
 	return errors.Is(err, daemonkit.ErrAbsent) ||
 		errors.Is(err, daemonkit.ErrNotReady) ||

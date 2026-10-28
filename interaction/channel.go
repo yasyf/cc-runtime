@@ -49,8 +49,8 @@ const askBudget = 4 * time.Minute
 // newChannelClient opens the business lane of cc-runtime's daemon. The channel
 // server is a separate stdio process, so every tool handler round-trips over it
 // rather than appending directly.
-func newChannelClient() (*daemon.Client, error) {
-	spec, err := DaemonSpec()
+func newChannelClient(build string) (*daemon.Client, error) {
+	spec, err := DaemonSpec(build)
 	if err != nil {
 		return nil, err
 	}
@@ -182,13 +182,13 @@ func awaitAnswer(ctx context.Context, client *daemon.Client, session, scope stri
 // orchestrated agent plus a manual `cc-runtime wrap -- claude --resume
 // <session>` in the same scope — rebind the same subject back and forth and
 // share its questions and edit-gate state. That launch is unsupported.
-func ChannelTools(_ context.Context, session, scope string, pid int) ([]channel.Tool, string, string, error) {
+func ChannelTools(_ context.Context, build, session, scope string, pid int) ([]channel.Tool, string, string, error) {
 	ask := channel.Tool{
 		Name:        "ask",
 		Description: "Ask the human a question with structured options; remotely answerable and persisted for the session. Use this instead of the native AskUserQuestion. Blocks your edits until the human responds.",
 		InputSchema: askToolSchema(),
 		Handler: func(ctx context.Context, args json.RawMessage, _ func(string)) (string, bool) {
-			client, err := newChannelClient()
+			client, err := newChannelClient(build)
 			if err != nil {
 				return "ask failed: " + err.Error(), true
 			}
@@ -222,7 +222,7 @@ func ChannelTools(_ context.Context, session, scope string, pid int) ([]channel.
 		Description: "Send the human a notification, delivered remotely to the web app or phone. Use this instead of PushNotification.",
 		InputSchema: notifyToolSchema(),
 		Handler: func(ctx context.Context, args json.RawMessage, _ func(string)) (string, bool) {
-			client, err := newChannelClient()
+			client, err := newChannelClient(build)
 			if err != nil {
 				return "notify failed: " + err.Error(), true
 			}

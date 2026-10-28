@@ -83,7 +83,6 @@ func TestTransientDaemonSwap(t *testing.T) {
 		{name: "still starting", err: daemonkit.ErrNotReady, want: true},
 		{name: "already draining", err: daemonkit.ErrDraining, want: true},
 		{name: "wrapped no listener", err: fmt.Errorf("resolve: %w", daemonkit.ErrAbsent), want: true},
-		{name: "untrusted peer", err: daemonkit.ErrUntrusted},
 		{name: "ordinary error", err: errors.New("boom")},
 	}
 

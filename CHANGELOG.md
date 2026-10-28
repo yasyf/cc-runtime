@@ -6,6 +6,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Any process running as the same user can now connect to the daemon; peer
+  signatures and spawned commands are no longer verified. Development rebuilds
+  use the executable's modification time as their build version instead of
+  hashing the executable, so commands can recognize and replace an older build.
+
 ## [0.18.0] - 2026-08-30
 
 ### Changed

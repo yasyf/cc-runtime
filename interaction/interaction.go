@@ -21,12 +21,7 @@ const AppName = "cc-runtime"
 // appDir is the state-directory basename under the user's home.
 const appDir = ".cc-runtime"
 
-// The release identity cc-runtime's daemon is signed and launched under.
-const (
-	agentLabel        = "com.yasyf.cc-runtime"
-	teamID            = "SXKCTF23Q2"
-	signingIdentifier = "cc-runtime"
-)
+const agentLabel = "com.yasyf.cc-runtime"
 
 // WrapSentinel is the unique marker `cc-runtime wrap` embeds in the child's
 // appended system prompt and mirrors into the CC_RUNTIME_WRAP env var. The MCP
@@ -46,26 +41,17 @@ const WrapEnvVar = "CC_RUNTIME_WRAP"
 // layout: the socket, db, and http handshake the daemon and every client share.
 func AppPaths() paths.Paths { return paths.Paths{App: appDir} }
 
-// DaemonSpec is the one daemonkit identity the launcher, the daemon, and every
-// client share. The control lane pins the identity cc-runtime is released
-// under; the serving posture is the same-user waiver, because a dev build is
-// unsigned and a signed posture would refuse it.
-func DaemonSpec() (daemonkit.Daemon, error) {
-	program, err := daemonkit.Stable()
+func DaemonSpec(build string) (daemonkit.Daemon, error) {
+	program, err := daemonkit.Stable(build)
 	if err != nil {
 		return daemonkit.Daemon{}, err
 	}
-	requirement := daemonkit.Requirement{TeamID: teamID, SigningIdentifier: signingIdentifier}
 	return daemon.Spec(daemonkit.Daemon{
 		Label:   agentLabel,
 		Program: program,
 		Args:    []string{"daemon"},
 		Log:     AppPaths().LogPath(),
 		Restart: daemonkit.RestartOnFailure,
-		Trust: daemonkit.Trust{
-			Control: &requirement,
-			Serving: daemonkit.ServingSameUser(),
-		},
 	}), nil
 }
 

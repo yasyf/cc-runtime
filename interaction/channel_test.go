@@ -29,7 +29,7 @@ type channelHarness struct {
 func newChannelHarness(t *testing.T) *channelHarness {
 	t.Helper()
 	isolateHome(t)
-	spec, err := DaemonSpec()
+	spec, err := DaemonSpec("test")
 	if err != nil {
 		t.Fatalf("DaemonSpec: %v", err)
 	}
@@ -76,7 +76,7 @@ func newChannelHarness(t *testing.T) *channelHarness {
 
 func askTool(t *testing.T, session string, pid int) channel.Tool {
 	t.Helper()
-	tools, method, instructions, err := ChannelTools(context.Background(), session, testScope, pid)
+	tools, method, instructions, err := ChannelTools(context.Background(), "test", session, testScope, pid)
 	if err != nil {
 		t.Fatalf("ChannelTools: %v", err)
 	}
@@ -442,7 +442,7 @@ func TestFreshWindowDoesNotInheritDeadOwnersAwaitingSubject(t *testing.T) {
 // one window in a non-default scope.
 func askToolFor(t *testing.T, session string, pid int, scope string) channel.Tool {
 	t.Helper()
-	tools, _, _, err := ChannelTools(context.Background(), session, scope, pid)
+	tools, _, _, err := ChannelTools(context.Background(), "test", session, scope, pid)
 	if err != nil {
 		t.Fatalf("ChannelTools: %v", err)
 	}
