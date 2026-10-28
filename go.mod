@@ -12,9 +12,9 @@ require (
 	github.com/mdp/qrterminal/v3 v3.2.1
 	github.com/shirou/gopsutil/v4 v4.26.5
 	github.com/spf13/cobra v1.10.2
-	github.com/yasyf/cc-interact v0.38.1-0.20261028042730-4062b9bc5703
-	github.com/yasyf/daemonkit v0.34.1-0.20261028043932-567e3df37f44
-	github.com/yasyf/synckit v0.46.1-0.20261028042517-18536ed9b209
+	github.com/yasyf/cc-interact v0.39.0
+	github.com/yasyf/daemonkit v0.35.1
+	github.com/yasyf/synckit v0.47.0
 	golang.org/x/net v0.60.0
 	modernc.org/sqlite v1.52.0
 )
@@ -72,3 +72,5 @@ require (
 	modernc.org/memory v1.11.0 // indirect
 	rsc.io/qr v0.2.0 // indirect
 )
+
+toolchain go1.26.10
