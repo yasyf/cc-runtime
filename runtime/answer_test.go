@@ -30,7 +30,7 @@ func (e *e2e) runAnswer(args ...string) (string, error) {
 	var out bytes.Buffer
 	c.SetOut(&out)
 	c.SetErr(&out)
-	c.SetArgs(append([]string{"--cwd", e2eScope}, args...))
+	c.SetArgs(append([]string{"--cwd", e2eScope()}, args...))
 	err := c.ExecuteContext(context.Background())
 	return out.String(), err
 }

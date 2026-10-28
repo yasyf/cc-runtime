@@ -154,7 +154,7 @@ func TestRESTSessionsListsActiveSubjectsAcrossScopes(t *testing.T) {
 	h.getJSON("/api/sessions", &got)
 	want := []ListedSubject{
 		{SubjectID: subjectB, Scope: "/scope/b", Status: StatusIdle, Pending: 0},
-		{SubjectID: subjectA, Scope: testScope, Status: StatusAwaiting, Pending: 2},
+		{SubjectID: subjectA, Scope: testScope(), Status: StatusAwaiting, Pending: 2},
 	}
 	if len(got.Subjects) != len(want) {
 		t.Fatalf("sessions = %+v, want %+v", got.Subjects, want)
@@ -230,7 +230,7 @@ func TestRESTAnswerIsIdempotent(t *testing.T) {
 	}
 
 	pollBodyJSON, _ := json.Marshal(pollBody{SubjectID: subjectID, QuestionID: questionID})
-	r := h.do(daemon.Envelope{Op: OpAnswerPoll, Scope: testScope, Body: pollBodyJSON})
+	r := h.do(daemon.Envelope{Op: OpAnswerPoll, Scope: testScope(), Body: pollBodyJSON})
 	var reply pollReply
 	if err := json.Unmarshal(r.Body, &reply); err != nil {
 		t.Fatalf("unmarshal poll: %v", err)

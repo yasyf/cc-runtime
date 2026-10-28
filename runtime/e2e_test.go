@@ -21,8 +21,9 @@ import (
 const (
 	e2eSession = "e2e-sess"
 	e2ePID     = 51515
-	e2eScope   = "/e2e/scope"
 )
+
+func e2eScope() string { return os.Getenv("HOME") }
 
 // e2e drives the real cc-runtime daemon — the production buildServer composition
 // — over its unix socket against an ephemeral on-disk SQLite, exactly as in
@@ -77,7 +78,7 @@ func awaitBusiness(t *testing.T, spec daemonkit.Daemon) *daemon.Client {
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		probeCtx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
-		reply, err := client.Do(probeCtx, daemon.Envelope{Op: daemon.OpStatus, Scope: e2eScope})
+		reply, err := client.Do(probeCtx, daemon.Envelope{Op: daemon.OpStatus, Scope: e2eScope()})
 		cancel()
 		if err == nil && reply.OK {
 			return client
@@ -160,7 +161,7 @@ func (e *e2e) agentEnv(op daemon.Op, body any) daemon.Envelope {
 		}
 		raw = b
 	}
-	return daemon.Envelope{Op: op, Session: e2eSession, ClaudePID: e2ePID, Scope: e2eScope, Body: raw}
+	return daemon.Envelope{Op: op, Session: e2eSession, ClaudePID: e2ePID, Scope: e2eScope(), Body: raw}
 }
 
 func (e *e2e) start() string {
@@ -201,7 +202,7 @@ func (e *e2e) answer(subjectID string, questionID int64, selected []string) bool
 		QuestionID: questionID,
 		Selected:   selected,
 	})
-	r := e.do(daemon.Envelope{Op: interaction.OpAnswer, Scope: e2eScope, Body: body})
+	r := e.do(daemon.Envelope{Op: interaction.OpAnswer, Scope: e2eScope(), Body: body})
 	if !r.OK {
 		e.t.Fatalf("answer: %s", r.Error)
 	}
@@ -219,7 +220,7 @@ func (e *e2e) answer(subjectID string, questionID int64, selected []string) bool
 func (e *e2e) resolveSubject() subject.Subject {
 	e.t.Helper()
 	w := subject.Window{Session: e2eSession, ClaudePID: e2ePID}
-	sub, ok, err := e.resolver.Find(context.Background(), w, e2eScope)
+	sub, ok, err := e.resolver.Find(context.Background(), w, e2eScope())
 	if err != nil {
 		e.t.Fatalf("resolve subject: %v", err)
 	}
@@ -234,9 +235,10 @@ func (e *e2e) resolveSubject() subject.Subject {
 // the daemon would render.
 func (e *e2e) gateDirect() (bool, string) {
 	e.t.Helper()
+	input, _ := json.Marshal(map[string]string{"file_path": filepath.Join(e2eScope(), "x.go")})
 	return interaction.Gate()(context.Background(), e.resolveSubject(), daemon.ToolCall{
 		Name:  "Edit",
-		Input: json.RawMessage(`{"file_path":"x.go"}`),
+		Input: input,
 	})
 }
 
@@ -246,10 +248,10 @@ func (e *e2e) gateGuardEdit() (bool, string) {
 	e.t.Helper()
 	body, _ := json.Marshal(map[string]any{
 		"tool_name":  "Edit",
-		"tool_input": json.RawMessage(`{"file_path":"x.go"}`),
+		"tool_input": map[string]string{"file_path": filepath.Join(e2eScope(), "x.go")},
 	})
 	r := e.do(daemon.Envelope{
-		Op: daemon.OpGuardEdit, Session: e2eSession, ClaudePID: e2ePID, Scope: e2eScope, Body: body,
+		Op: daemon.OpGuardEdit, Session: e2eSession, ClaudePID: e2ePID, Scope: e2eScope(), Body: body,
 	})
 	if !r.OK {
 		e.t.Fatalf("guard-edit: %s", r.Error)
@@ -259,7 +261,7 @@ func (e *e2e) gateGuardEdit() (bool, string) {
 
 func (e *e2e) status(subjectID string) string {
 	e.t.Helper()
-	r := e.do(daemon.Envelope{Op: interaction.OpList, Scope: e2eScope})
+	r := e.do(daemon.Envelope{Op: interaction.OpList, Scope: e2eScope()})
 	if !r.OK {
 		e.t.Fatalf("list: %s", r.Error)
 	}
@@ -280,7 +282,7 @@ func (e *e2e) status(subjectID string) string {
 func (e *e2e) poll(subjectID string, questionID int64) (bool, interaction.AnswerPayload) {
 	e.t.Helper()
 	body, _ := json.Marshal(map[string]any{"subject_id": subjectID, "question_id": questionID})
-	r := e.do(daemon.Envelope{Op: interaction.OpAnswerPoll, Scope: e2eScope, Body: body})
+	r := e.do(daemon.Envelope{Op: interaction.OpAnswerPoll, Scope: e2eScope(), Body: body})
 	if !r.OK {
 		e.t.Fatalf("answer-poll: %s", r.Error)
 	}
@@ -468,7 +470,7 @@ func TestE2ECaptureNotificationNeverBlocks(t *testing.T) {
 
 	body, _ := json.Marshal(interaction.NotificationPayload{Message: "build finished"})
 	r := e.do(daemon.Envelope{
-		Op: interaction.OpCaptureNotification, Session: e2eSession, ClaudePID: e2ePID, Scope: e2eScope, Body: body,
+		Op: interaction.OpCaptureNotification, Session: e2eSession, ClaudePID: e2ePID, Scope: e2eScope(), Body: body,
 	})
 	if !r.OK {
 		t.Fatalf("capture-notification: %s", r.Error)
@@ -489,7 +491,7 @@ func TestE2ECaptureNotificationNeverBlocks(t *testing.T) {
 func (e *e2e) pending(subjectID string) []interaction.PendingQuestion {
 	e.t.Helper()
 	body, _ := json.Marshal(map[string]any{"subject_id": subjectID})
-	r := e.do(daemon.Envelope{Op: interaction.OpPending, Scope: e2eScope, Body: body})
+	r := e.do(daemon.Envelope{Op: interaction.OpPending, Scope: e2eScope(), Body: body})
 	if !r.OK {
 		e.t.Fatalf("pending: %s", r.Error)
 	}
@@ -525,7 +527,7 @@ func TestE2ECaptureQuestionNeverBlocks(t *testing.T) {
 		Options:     []interaction.Option{{Label: "blue-green"}, {Label: "canary"}},
 	})
 	r := e.do(daemon.Envelope{
-		Op: interaction.OpCaptureQuestion, Session: e2eSession, ClaudePID: e2ePID, Scope: e2eScope, Body: body,
+		Op: interaction.OpCaptureQuestion, Session: e2eSession, ClaudePID: e2ePID, Scope: e2eScope(), Body: body,
 	})
 	if !r.OK {
 		t.Fatalf("capture-question: %s", r.Error)

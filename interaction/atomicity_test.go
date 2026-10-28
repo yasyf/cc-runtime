@@ -69,7 +69,7 @@ func subjectStatusDirect(t *testing.T, db *sql.DB, subjectID string) string {
 func (h *harness) answerRaw(subjectID string, questionID int64, selected string) daemon.Reply {
 	h.t.Helper()
 	body, _ := json.Marshal(AnswerPayload{SubjectID: subjectID, QuestionID: questionID, Selected: []string{selected}})
-	return h.do(daemon.Envelope{Op: OpAnswer, Scope: testScope, Body: body})
+	return h.do(daemon.Envelope{Op: OpAnswer, Scope: testScope(), Body: body})
 }
 
 // TestMultiAskAppendFailureNeverIdlesOpenSubject is the Defect-1 regression
