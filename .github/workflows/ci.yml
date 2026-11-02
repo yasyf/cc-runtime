@@ -16,6 +16,7 @@ jobs:
   go:
     if: github.event_name != 'pull_request'
     runs-on: macos-latest
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: cc-runtime
