@@ -11,6 +11,9 @@ on:
         default: false
 permissions:
   contents: write
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
 jobs:
   autobump:
     uses: yasyf/cc-skills/.github/workflows/plugin-autobump.yml@plugin-v1
