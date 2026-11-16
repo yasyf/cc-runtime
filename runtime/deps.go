@@ -42,7 +42,7 @@ func deps() cmd.Deps {
 			if err != nil {
 				return err
 			}
-			return launcher.EnsureCurrent(ctx, daemon.UpgradeTimeout)
+			return launcher.EnsureCurrent(ctx)
 		},
 		EnsureCurrentIfRunning: func(ctx context.Context) error {
 			launcher, err := launcher(build)
@@ -56,7 +56,7 @@ func deps() cmd.Deps {
 			if err != nil {
 				return err
 			}
-			return launcher.Stop(ctx, daemon.UpgradeTimeout)
+			return launcher.Stop(ctx)
 		},
 		ClaudePID:     claudePID,
 		WindowAlive:   live,

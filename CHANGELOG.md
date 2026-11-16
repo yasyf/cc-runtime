@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- On cc-interact v0.45.0. A daemon upgrade gets the time cc-interact derives from the daemon's shutdown grace plus its boot allowance, where it used to get a flat 30 s, and holds its turn until the new daemon is Ready. A client older than the newest build already placed no longer installs itself over that build.
+
+### Changed
+
 - Any process running as the same user can now connect to the daemon; peer
   signatures and spawned commands are no longer verified. Development rebuilds
   use the executable's modification time as their build version instead of
