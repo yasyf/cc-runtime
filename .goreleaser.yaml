@@ -13,7 +13,7 @@ builds:
     binary: cc-runtime
     env:
       - CGO_ENABLED=0
-    goos: [darwin, linux]
+    goos: [darwin]
     goarch: [amd64, arm64]
     flags:
       - -trimpath

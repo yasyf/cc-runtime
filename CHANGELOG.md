@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.1] - 2026-11-16
+
+### Removed
+
+- Releases ship macOS binaries only. cc-runtime imports daemonkit's launchd package through synckit, which builds on macOS alone, so the Linux builds failed the v0.18.0 and v0.19.0 releases.
+
 ## [0.19.0] - 2026-11-16
 
 ### Changed
